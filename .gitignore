@@ -1,0 +1,32 @@
+# Go build output
+/photo-frame
+/home-photo-frame
+*.exe
+
+# Photos (local data, not part of the repo)
+/photos/
+/backend/photos/
+# Thumbnail cache and metadata index
+/cache/
+/backend/cache/
+# Go module download cache
+/vendor/
+
+# Frontend dependencies and build output
+node_modules/
+/frontend/dist/
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
