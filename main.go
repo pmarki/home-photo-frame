@@ -12,9 +12,11 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -33,12 +35,50 @@ import (
 const thumbnailSize = 400
 
 var (
-	photosDir   string
-	cacheDir    string
-	serverPort  string
-	mediumWidth int
-	appTitle    string
+	photosDir    string
+	cacheDir     string
+	serverPort   string
+	mediumWidth  int
+	appTitle     string
+	videoEnabled bool
+	bgColor      string
+	iconsDir     string
 )
+
+func isVideo(filename string) bool {
+	return strings.ToLower(filepath.Ext(filename)) == ".mp4"
+}
+
+func isValidHexColor(s string) bool {
+	if len(s) != 7 || s[0] != '#' {
+		return false
+	}
+	for _, c := range s[1:] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// extractVideoFrame runs ffmpeg to extract a single frame (5th frame, falling
+// back to frame 0 for very short clips) and returns it as a decoded image.
+func extractVideoFrame(srcPath string) (image.Image, error) {
+	for _, filter := range []string{"select=gte(n\\,4)", "select=eq(n\\,0)"} {
+		cmd := exec.Command("ffmpeg",
+			"-loglevel", "error",
+			"-i", srcPath,
+			"-vf", filter, "-vframes", "1",
+			"-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "2", "-")
+		out, err := cmd.Output()
+		if err == nil && len(out) > 0 {
+			if img, _, err := image.Decode(bytes.NewReader(out)); err == nil {
+				return img, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("ffmpeg: could not extract frame from %s", srcPath)
+}
 
 // frontendFS is set by embed.go / embed_dev.go before main() runs.
 var frontendFS fs.FS
@@ -126,15 +166,17 @@ func runMetaSaver() {
 }
 
 func extractBestDate(filename, srcPath string) time.Time {
-	// 1. EXIF DateTimeOriginal / DateTime
-	if f, err := os.Open(srcPath); err == nil {
-		if x, err := exif.Decode(f); err == nil {
-			if t, err := x.DateTime(); err == nil {
-				f.Close()
-				return t
+	// 1. EXIF DateTimeOriginal / DateTime (images only — videos have no EXIF)
+	if !isVideo(filename) {
+		if f, err := os.Open(srcPath); err == nil {
+			if x, err := exif.Decode(f); err == nil {
+				if t, err := x.DateTime(); err == nil {
+					f.Close()
+					return t
+				}
 			}
+			f.Close()
 		}
-		f.Close()
 	}
 	// 2. Filename pattern: YYYYMMDD_HHMMSS at start of base name
 	base := strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filename))
@@ -585,7 +627,13 @@ func serveCachedThumb(
 		return
 	}
 
-	img, err := imaging.Open(srcPath, imaging.AutoOrientation(true))
+	var img image.Image
+	var err error
+	if isVideo(filename) {
+		img, err = extractVideoFrame(srcPath)
+	} else {
+		img, err = imaging.Open(srcPath, imaging.AutoOrientation(true))
+	}
 	if err != nil {
 		http.Error(w, "failed to decode image", http.StatusInternalServerError)
 		return
@@ -1215,7 +1263,11 @@ func envOr(key, fallback string) string {
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	json.NewEncoder(w).Encode(map[string]string{"title": appTitle})
+	json.NewEncoder(w).Encode(map[string]any{
+		"title":        appTitle,
+		"videoEnabled": videoEnabled,
+		"bgColor":      bgColor,
+	})
 }
 
 // handleManifest serves the PWA manifest with name/short_name replaced by the
@@ -1232,6 +1284,20 @@ func handleManifest(w http.ResponseWriter, r *http.Request) {
 	}
 	m["name"] = appTitle
 	m["short_name"] = appTitle
+	m["background_color"] = bgColor
+	if videoEnabled {
+		if st, ok := m["share_target"].(map[string]any); ok {
+			if params, ok := st["params"].(map[string]any); ok {
+				if files, ok := params["files"].([]any); ok && len(files) > 0 {
+					if f0, ok := files[0].(map[string]any); ok {
+						if accept, ok := f0["accept"].([]any); ok {
+							f0["accept"] = append(accept, "video/mp4")
+						}
+					}
+				}
+			}
+		}
+	}
 	data, err := json.Marshal(m)
 	if err != nil {
 		http.Error(w, "manifest encode error", http.StatusInternalServerError)
@@ -1240,6 +1306,41 @@ func handleManifest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/manifest+json")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Write(data) //nolint:errcheck
+}
+
+// handleIcons serves icon files from iconsDir when set, falling back to the
+// embedded frontend assets. Allows custom icons without rebuilding the binary.
+func handleIcons(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/icons/")
+	if !isValidFilename(name) {
+		http.Error(w, "invalid", http.StatusBadRequest)
+		return
+	}
+
+	if iconsDir != "" {
+		p := filepath.Join(iconsDir, name)
+		if _, err := os.Stat(p); err == nil {
+			w.Header().Set("Cache-Control", "public, max-age=3600")
+			http.ServeFile(w, r, p)
+			return
+		}
+	}
+
+	if frontendFS != nil {
+		data, err := fs.ReadFile(frontendFS, "icons/"+name)
+		if err == nil {
+			mt := mime.TypeByExtension(filepath.Ext(name))
+			if mt == "" {
+				mt = "application/octet-stream"
+			}
+			w.Header().Set("Content-Type", mt)
+			w.Header().Set("Cache-Control", "public, max-age=3600")
+			w.Write(data) //nolint:errcheck
+			return
+		}
+	}
+
+	http.NotFound(w, r)
 }
 
 func main() {
@@ -1252,7 +1353,24 @@ func main() {
 		mediumWidthDefault = v
 	}
 	flag.IntVar(&mediumWidth, "medium-width", mediumWidthDefault, "max pixel width for medium thumbnails (env: MEDIUM_WIDTH)")
+	videoDefault := strings.EqualFold(envOr("VIDEO", ""), "1") || strings.EqualFold(envOr("VIDEO", ""), "true")
+	flag.BoolVar(&videoEnabled, "video", videoDefault, "enable mp4 video upload and thumbnails; requires ffmpeg (env: VIDEO=1)")
+	flag.StringVar(&bgColor, "bg-color", envOr("BG_COLOR", "#0a0a0f"), "primary background hex colour (env: BG_COLOR)")
+	flag.StringVar(&iconsDir, "icons-dir", envOr("ICONS_DIR", ""), "directory with custom icon files; falls back to embedded (env: ICONS_DIR)")
 	flag.Parse()
+
+	if !isValidHexColor(bgColor) {
+		log.Printf("warning: invalid BG_COLOR %q, falling back to #0a0a0f", bgColor)
+		bgColor = "#0a0a0f"
+	}
+
+	if videoEnabled {
+		supportedExts[".mp4"] = true
+		mime.AddExtensionType(".mp4", "video/mp4")
+		if _, err := exec.LookPath("ffmpeg"); err != nil {
+			log.Println("warning: ffmpeg not found in PATH — video thumbnails will fail")
+		}
+	}
 
 	for _, p := range []*string{&photosDir, &cacheDir} {
 		abs, err := filepath.Abs(*p)
@@ -1305,6 +1423,7 @@ func main() {
 	mux.HandleFunc("/api/crop/", handleCrop)
 	mux.HandleFunc("/api/delete/", handleDelete)
 	mux.HandleFunc("/manifest.webmanifest", handleManifest)
+	mux.HandleFunc("/icons/", handleIcons)
 	mux.Handle("/", frontendHandler())
 
 	addr := serverPort

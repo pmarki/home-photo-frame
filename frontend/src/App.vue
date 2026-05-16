@@ -50,7 +50,7 @@
         ref="fileInput"
         type="file"
         multiple
-        accept="image/*"
+        :accept="videoEnabled ? 'image/*,video/mp4' : 'image/*'"
         style="display:none"
         @change="onFilesSelected"
       />
@@ -125,6 +125,9 @@ const fileInput = ref(null)
 const sortOpen = ref(false)
 const toasts = ref([])
 let toastSeq = 0
+const videoEnabled = ref(false)
+
+const isVideo = (filename) => filename?.toLowerCase().endsWith('.mp4')
 const sortRef = ref(null)
 const appTitle = ref('Photo Frame')
 
@@ -182,8 +185,9 @@ function onFilesSelected(e) {
 
 function onUploadDone(uploadedImages) {
   uploadFiles.value = null
-  if (uploadedImages?.length > 0) {
-    cropQueue.value = uploadedImages
+  const croppable = uploadedImages?.filter(i => !isVideo(i.filename)) ?? []
+  if (croppable.length > 0) {
+    cropQueue.value = croppable
   } else {
     forceReload()
   }
@@ -204,8 +208,9 @@ function onShareDone(uploadedImages) {
   const url = new URL(window.location.href)
   url.searchParams.delete('share-pending')
   history.replaceState({}, '', url)
-  if (uploadedImages?.length > 0) {
-    cropQueue.value = uploadedImages
+  const croppable = uploadedImages?.filter(i => !isVideo(i.filename)) ?? []
+  if (croppable.length > 0) {
+    cropQueue.value = croppable
   } else {
     forceReload()
   }
@@ -224,6 +229,8 @@ onMounted(() => {
         appTitle.value = cfg.title
         document.title = cfg.title
       }
+      if (cfg?.videoEnabled) videoEnabled.value = true
+      if (cfg?.bgColor) document.documentElement.style.setProperty('--bg-color', cfg.bgColor)
     })
     .catch(() => {})
 
@@ -247,7 +254,7 @@ onUnmounted(() => {
 html { height: 100%; }
 
 body {
-  background: #0a0a0f;
+  background: var(--bg-color, #0a0a0f);
   color: #e0e0e8;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   min-height: 100%;
@@ -266,10 +273,10 @@ body {
   position: sticky;
   top: 0;
   z-index: 100;
-  background: rgba(10, 10, 15, 0.9);
+  background: color-mix(in srgb, var(--bg-color, #0a0a0f) 45%, black);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid color-mix(in srgb, var(--bg-color, #0a0a0f) 80%, white);
   padding: 10px 12px;
   margin: 0 -12px;
   display: flex;

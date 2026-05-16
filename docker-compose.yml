@@ -1,0 +1,50 @@
+services:
+  photo-frame:
+    image: photo-frame:latest
+    # build: .                          # uncomment to build locally instead
+    ports:
+      - "8080:8080"
+
+    environment:
+      # ── Content ────────────────────────────────────────────────────────
+      # Directory inside the container where source photos are read from.
+      PHOTOS_DIR: /data/photos
+
+      # Directory inside the container used for generated thumbnail cache.
+      CACHE_DIR: /data/cache
+
+      # ── Server ─────────────────────────────────────────────────────────
+      PORT: 8080
+
+      # ── Appearance ─────────────────────────────────────────────────────
+      # Title shown in the browser tab, PWA install prompt, and app header.
+      APP_TITLE: Photo Frame
+
+      # Primary background colour (hex, always dark).
+      # Header and letterbox areas are derived from this automatically.
+      BG_COLOR: "#0a0a0f"
+
+      # Directory with custom icon-192.png / icon-512.png to replace the
+      # embedded defaults. Omit (or leave empty) to use built-in icons.
+      ICONS_DIR: /data/icons
+
+      # ── Media ──────────────────────────────────────────────────────────
+      # Set to 1 to enable MP4 upload, video thumbnails, and in-browser
+      # playback. Requires ffmpeg to be available in the container.
+      VIDEO: "0"
+
+      # Maximum pixel width of the medium-resolution thumbnail served to
+      # the lightbox. Reduce for slower devices / limited storage.
+      MEDIUM_WIDTH: "2000"
+
+    volumes:
+      # Photos source directory — mount your actual photo library here.
+      - /path/to/your/photos:/data/photos
+
+      # Thumbnail cache — persist across restarts to avoid re-generating.
+      - /path/to/your/cache:/data/cache
+
+      # Custom icons — optional, only needed when ICONS_DIR is set above.
+      # - /path/to/your/icons:/data/icons
+
+    restart: unless-stopped

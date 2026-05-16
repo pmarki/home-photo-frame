@@ -28,6 +28,7 @@
           class="gallery-thumb"
           @error="onImgError"
         />
+        <div v-if="isVideo(img.filename)" class="video-badge" aria-hidden="true">▶</div>
         <div class="gallery-overlay" aria-hidden="true">
           <span class="gallery-name">{{ img.filename }}</span>
         </div>
@@ -65,6 +66,8 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['load-more', 'open'])
+
+const isVideo = (filename) => filename?.toLowerCase().endsWith('.mp4')
 
 const sentinel = ref(null)
 let observer = null
@@ -156,7 +159,7 @@ watch(() => props.hasMore, (val) => {
   aspect-ratio: 1;
   overflow: hidden;
   border-radius: 2px;
-  background: #111118;
+  background: color-mix(in srgb, var(--bg-color, #0a0a0f) 55%, black);
   cursor: pointer;
   border: none;
   padding: 0;
@@ -174,6 +177,23 @@ watch(() => props.hasMore, (val) => {
 }
 
 /* ─── Orientation badge ─────────────────────────────────────────────── */
+.video-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 0.65rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  padding-left: 2px; /* optical centre for ▶ */
+}
+
 .orientation-badge {
   position: absolute;
   bottom: 5px;

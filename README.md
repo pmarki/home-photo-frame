@@ -72,22 +72,73 @@ make build          # builds frontend, compiles binary with embedded assets
 | `-port` | `PORT` | `8080` | Port to listen on (`8080` or `:8080`) |
 | `-title` | `APP_TITLE` | `Photo Frame` | App title shown in the browser tab, header, and PWA manifest |
 | `-medium-width` | `MEDIUM_WIDTH` | `2000` | Max pixel width for medium thumbnails used in the lightbox |
+| `-bg-color` | `BG_COLOR` | `#0a0a0f` | Primary background hex colour; header and letterbox areas are derived from it automatically |
+| `-icons-dir` | `ICONS_DIR` | *(embedded)* | Directory with custom `icon-192.png` / `icon-512.png`; falls back to built-in icons when unset |
+| `-video` | `VIDEO` | `false` | Enable MP4 upload, video thumbnails, and in-browser playback. Requires `ffmpeg` in `PATH` (`VIDEO=1`) |
 
 The binary is fully self-contained — copy it anywhere with a `photos/` folder alongside and it works.
 
-### Docker / Alpine
+### Docker
 
-The binary is statically linked (`CGO_ENABLED=0`, no libc dependency) and runs on Alpine or a scratch image:
+A multi-stage `Dockerfile` is included. It builds the Node frontend, compiles the Go binary with the frontend embedded, and produces a minimal Alpine runtime image (~30 MB including ffmpeg).
 
-```dockerfile
-FROM alpine:3.19
-COPY photo-frame /usr/local/bin/photo-frame
-VOLUME ["/photos", "/cache"]
-EXPOSE 8080
-ENTRYPOINT ["photo-frame", "-photos", "/photos", "-cache", "/cache"]
+**Build and run**
+
+```bash
+docker build -t photo-frame .
+docker run -p 8080:8080 \
+  -v /path/to/photos:/data/photos \
+  -v /path/to/cache:/data/cache \
+  photo-frame
 ```
 
-Build on the host with `make build`, then copy the binary in.
+**Docker Compose**
+
+A fully-annotated `docker-compose.yml` is included with every env var and volume documented:
+
+```bash
+# copy and edit to taste
+cp docker-compose.yml my-frame/docker-compose.yml
+
+docker compose up -d
+```
+
+Minimal working compose:
+
+```yaml
+services:
+  photo-frame:
+    image: photo-frame:latest
+    ports:
+      - "8080:8080"
+    environment:
+      APP_TITLE: Living Room Frame
+      BG_COLOR: "#0a0a1a"
+    volumes:
+      - /mnt/nas/photos:/data/photos
+      - /mnt/nas/cache:/data/cache
+    restart: unless-stopped
+```
+
+**Video support**
+
+`ffmpeg` is already included in the image. Enable it with:
+
+```yaml
+environment:
+  VIDEO: "1"
+```
+
+**Custom icons**
+
+Mount a directory containing `icon-192.png` and `icon-512.png`:
+
+```yaml
+environment:
+  ICONS_DIR: /data/icons
+volumes:
+  - /path/to/icons:/data/icons
+```
 
 ### Running two instances in parallel
 
@@ -141,7 +192,7 @@ Returns a sorted list of all images (or a paginated page when `limit` is supplie
 
 | Parameter | Values | Default | Description |
 |---|---|---|---|
-| `sort` | `date` \| `name` | `date` | Sort field. `date` uses EXIF DateTimeOriginal, then filename pattern `YYYYMMDD_HHMMSS`, then file mtime |
+| `sort` | `taken` \| `mtime` \| `name` | `taken` | Sort field. `taken` uses EXIF DateTimeOriginal → filename pattern `YYYYMMDD_HHMMSS` → file mtime. `mtime` sorts by OS modification time (useful to see recently added files first) |
 | `order` | `asc` \| `desc` | `desc` | Sort direction |
 | `limit` | 1–200 | *(omit for all)* | Images per page. When omitted all images are returned in one response |
 | `page` | integer ≥ 1 | `1` | Page number (1-based); only meaningful when `limit` is set |
@@ -227,6 +278,8 @@ Install the PWA from Chrome on Android ("Add to Home Screen"). After installatio
 ├── embed_dev.go              filesystem fallback      (build tag: dev)
 ├── go.mod / go.sum
 ├── Makefile
+├── Dockerfile                multi-stage build (Node → Go → Alpine runtime)
+├── docker-compose.yml        annotated example with all env vars and volumes
 ├── cmd/
 │   └── genicons/             generates PWA icon PNGs (stdlib only, no deps)
 ├── frontend/

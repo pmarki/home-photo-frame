@@ -49,8 +49,12 @@
             <line x1="12" y1="15" x2="12" y2="3"/>
           </svg>
         </button>
-        <!-- Crop -->
-        <button class="lb-icon-btn" title="Crop image" @click="cropping = true">
+        <!-- Crop (images only; always rendered so header width stays constant) -->
+        <button
+          class="lb-icon-btn"
+          title="Crop image"
+          @click="!isVideo(currentImage.filename) && (cropping = true)"
+        >
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="6 2 6 18 22 18"/>
             <polyline points="2 6 18 6 18 22"/>
@@ -82,7 +86,17 @@
 
       <transition :name="transitionName" mode="out-in">
         <div class="lb-image-wrap" :key="currentIndex">
+          <video
+            v-if="isVideo(currentImage.filename)"
+            :src="`/api/original/${encodeURIComponent(currentImage.filename)}`"
+            class="lb-image"
+            :class="{ loaded: imgLoaded }"
+            autoplay muted loop playsinline controls
+            @loadeddata="imgLoaded = true"
+            @error="imgError = true"
+          />
           <img
+            v-else
             :src="`/api/original/${encodeURIComponent(currentImage.filename)}`"
             :alt="currentImage.filename"
             class="lb-image"
@@ -93,7 +107,7 @@
           <div v-if="!imgLoaded && !imgError" class="lb-spinner-wrap" aria-hidden="true">
             <div class="spinner" />
           </div>
-          <div v-if="imgError" class="lb-error">Failed to load image</div>
+          <div v-if="imgError" class="lb-error">Failed to load</div>
         </div>
       </transition>
 
@@ -140,6 +154,8 @@ const deleteArmed  = ref(false)
 const deleting     = ref(false)
 const cropping     = ref(false)
 const actionError  = ref('')
+
+const isVideo = (filename) => filename?.toLowerCase().endsWith('.mp4')
 
 const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function'
 
@@ -255,6 +271,7 @@ function onTouchStart(e) {
 }
 
 function onTouchEnd(e) {
+  if (cropping.value) return
   const dx = touchStartX - e.changedTouches[0].clientX
   const dy = Math.abs(touchStartY - e.changedTouches[0].clientY)
   // Only treat as horizontal swipe if horizontal movement dominates
