@@ -96,6 +96,9 @@
         :images="cropQueue"
         @done="onCropQueueDone"
       />
+      <div class="toast-container">
+        <div v-for="toast in toasts" :key="toast.id" class="toast">{{ toast.message }}</div>
+      </div>
     </Teleport>
   </div>
 </template>
@@ -120,6 +123,8 @@ const uploadFiles = ref(null)
 const cropQueue = ref(null)  // [{filename}] — shown after upload when non-null
 const fileInput = ref(null)
 const sortOpen = ref(false)
+const toasts = ref([])
+let toastSeq = 0
 const sortRef = ref(null)
 const appTitle = ref('Photo Frame')
 
@@ -128,10 +133,12 @@ function onClickOutside(e) {
 }
 
 const sortOptions = [
-  { key: 'name-asc',  label: 'Name ↑',  sortBy: 'name', order: 'asc'  },
-  { key: 'name-desc', label: 'Name ↓',  sortBy: 'name', order: 'desc' },
-  { key: 'date-asc',  label: 'Date ↑',  sortBy: 'date', order: 'asc'  },
-  { key: 'date-desc', label: 'Date ↓',  sortBy: 'date', order: 'desc' }
+  { key: 'taken-desc',  label: 'Date taken ↓',     sortBy: 'taken', order: 'desc' },
+  { key: 'taken-asc',   label: 'Date taken ↑',     sortBy: 'taken', order: 'asc'  },
+  { key: 'mtime-desc',  label: 'Date modified ↓',  sortBy: 'mtime', order: 'desc' },
+  { key: 'mtime-asc',   label: 'Date modified ↑',  sortBy: 'mtime', order: 'asc'  },
+  { key: 'name-asc',    label: 'Name ↑',           sortBy: 'name',  order: 'asc'  },
+  { key: 'name-desc',   label: 'Name ↓',           sortBy: 'name',  order: 'desc' },
 ]
 
 function openModal(index) {
@@ -148,11 +155,29 @@ function closeModal() {
   }
 }
 
+function showToast(message) {
+  const id = ++toastSeq
+  toasts.value.push({ id, message })
+  setTimeout(() => { toasts.value = toasts.value.filter(t => t.id !== id) }, 4000)
+}
+
 function onFilesSelected(e) {
   const files = Array.from(e.target.files)
-  if (files.length === 0) return
-  uploadFiles.value = files
   e.target.value = ''
+  if (files.length === 0) return
+
+  const existingNames = new Set(images.value.map(img => img.filename))
+  const duplicates = files.filter(f => existingNames.has(f.name))
+  const unique = files.filter(f => !existingNames.has(f.name))
+
+  if (duplicates.length > 0) {
+    const label = duplicates.length === 1
+      ? `"${duplicates[0].name}" already exists`
+      : `${duplicates.length} files already exist`
+    showToast(label)
+  }
+
+  if (unique.length > 0) uploadFiles.value = unique
 }
 
 function onUploadDone(uploadedImages) {
@@ -369,4 +394,35 @@ body {
   font-size: 0.85rem;
 }
 .retry-btn:hover { background: rgba(248, 113, 113, 0.1); }
+
+/* ─── Toasts ───────────────────────────────────────────────────────── */
+.toast-container {
+  position: fixed;
+  bottom: calc(24px + env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+.toast {
+  background: #2a2a38;
+  color: #f0e08a;
+  border: 1px solid rgba(240, 224, 138, 0.25);
+  border-radius: 10px;
+  padding: 10px 18px;
+  font-size: 0.85rem;
+  white-space: nowrap;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  animation: toast-in 0.2s ease;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 </style>

@@ -1,6 +1,6 @@
 import { ref, computed } from 'vue'
 
-const PAGE_LIMIT = 50
+const PAGE_LIMIT = 150
 
 export function useGallery() {
   const images = ref([])
@@ -8,7 +8,7 @@ export function useGallery() {
   const currentPage = ref(0)
   const loading = ref(false)
   const error = ref(null)
-  const sortBy = ref(localStorage.getItem('sortBy') || 'date')
+  const sortBy = ref(localStorage.getItem('sortBy') || 'taken')
   const sortOrder = ref(localStorage.getItem('sortOrder') || 'desc')
 
   // hasMore is true before the first load (page 0) or when there are more pages.

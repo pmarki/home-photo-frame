@@ -17,7 +17,7 @@ Drop images into a folder, get a fast infinite-scroll gallery with full-screen l
 
 ## Features
 
-- **Infinite scroll** — 50 images per page, prefetches before reaching the bottom
+- **Infinite scroll** — 150 images per page, prefetches before reaching the bottom
 - **Thumbnail cache** — content-addressed JPEG thumbnails (400 px small, configurable medium); generated on demand and cached on disk; URL hash changes on file modification so browsers never show stale images
 - **File watcher** — detects images added, edited, or removed externally (inotify) and keeps the in-memory index in sync without a restart
 - **Nightly reconcile** — runs at 03:00 local time to catch any drift between disk, in-memory cache, and metadata (handles missed watcher events, external deletions, etc.)
@@ -135,7 +135,7 @@ Thumbnail URLs are content-addressed: the hash component encodes the source file
 
 ### GET /api/images
 
-Returns a paginated, sorted list of all images. This is the primary endpoint for building a custom slideshow client.
+Returns a sorted list of all images (or a paginated page when `limit` is supplied). This is the primary endpoint for building a custom slideshow client.
 
 **Query parameters**
 
@@ -143,13 +143,14 @@ Returns a paginated, sorted list of all images. This is the primary endpoint for
 |---|---|---|---|
 | `sort` | `date` \| `name` | `date` | Sort field. `date` uses EXIF DateTimeOriginal, then filename pattern `YYYYMMDD_HHMMSS`, then file mtime |
 | `order` | `asc` \| `desc` | `desc` | Sort direction |
-| `page` | integer ≥ 1 | `1` | Page number (1-based) |
-| `limit` | 1–200 | `50` | Images per page |
+| `limit` | 1–200 | *(omit for all)* | Images per page. When omitted all images are returned in one response |
+| `page` | integer ≥ 1 | `1` | Page number (1-based); only meaningful when `limit` is set |
 
-**Example request**
+**Example requests**
 
 ```
-GET /api/images?sort=date&order=desc&page=1&limit=20
+GET /api/images?sort=date&order=desc          # all images
+GET /api/images?sort=date&order=desc&limit=20&page=2  # page 2, 20 per page
 ```
 
 **Response** `200 OK` `application/json`
@@ -187,25 +188,16 @@ GET /api/images?sort=date&order=desc&page=1&limit=20
 | `page` | integer | Current page |
 | `limit` | integer | Page size used for this response |
 
-**Slideshow recipe** — fetch page 1 with `limit=1000` to get all filenames up front, then cycle through `thumbMedium` URLs (or `original`) at whatever interval you like. Re-fetch nightly to pick up new photos.
+**Slideshow recipe** — omit `limit` to get all images in one request, then cycle through `thumbMedium` URLs (or `original`) at whatever interval you like. Re-fetch nightly to pick up new photos.
 
 ```python
 import requests, random, time
 
 BASE = "http://photo-frame.local:8080"
 
-def all_images():
-    r = requests.get(f"{BASE}/api/images", params={"sort": "date", "order": "desc", "limit": 200, "page": 1})
-    data = r.json()
-    images = data["images"]
-    # paginate if needed
-    while len(images) < data["total"]:
-        page = len(images) // data["limit"] + 1
-        r = requests.get(f"{BASE}/api/images", params={"sort": "date", "order": "desc", "limit": 200, "page": page})
-        images.extend(r.json()["images"])
-    return images
+r = requests.get(f"{BASE}/api/images", params={"sort": "date", "order": "desc"})
+images = r.json()["images"]
 
-images = all_images()
 random.shuffle(images)
 for img in images:
     url = BASE + img["thumbMedium"]

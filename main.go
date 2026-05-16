@@ -237,10 +237,15 @@ func buildImagesCache() {
 		metaMu.RLock()
 		meta := metaIndex[e.Name()]
 		metaMu.RUnlock()
+		fileMtime := meta.FileMtime
+		if fileMtime.IsZero() {
+			fileMtime = fi.ModTime()
+		}
 		small, medium := thumbURLs(e.Name())
 		list = append(list, ImageInfo{
 			Filename:    e.Name(),
 			ModTime:     bestDate(e.Name(), fi.ModTime()),
+			FileMtime:   fileMtime,
 			Size:        fi.Size(),
 			Width:       meta.Width,
 			Height:      meta.Height,
@@ -299,7 +304,8 @@ func cacheUpdateDimensions(filename string, w, h int) {
 
 type ImageInfo struct {
 	Filename    string    `json:"filename"`
-	ModTime     time.Time `json:"modTime"`
+	ModTime     time.Time `json:"modTime"`  // best date: EXIF → filename pattern → mtime
+	FileMtime   time.Time `json:"-"`        // OS mtime, used for "date modified" sort
 	Size        int64     `json:"size"`
 	Width       int       `json:"width,omitempty"`
 	Height      int       `json:"height,omitempty"`
@@ -419,7 +425,23 @@ func sortImageSlice(images []ImageInfo, by, order string) {
 		} else {
 			sort.SliceStable(images, func(i, j int) bool { return images[i].Filename < images[j].Filename })
 		}
-	default: // "date" or unspecified → date descending
+	case "mtime":
+		if order == "asc" {
+			sort.SliceStable(images, func(i, j int) bool {
+				if images[i].FileMtime.Equal(images[j].FileMtime) {
+					return images[i].Filename < images[j].Filename
+				}
+				return images[i].FileMtime.Before(images[j].FileMtime)
+			})
+		} else {
+			sort.SliceStable(images, func(i, j int) bool {
+				if images[i].FileMtime.Equal(images[j].FileMtime) {
+					return images[i].Filename < images[j].Filename
+				}
+				return images[i].FileMtime.After(images[j].FileMtime)
+			})
+		}
+	default: // "taken", "date", or unspecified → sort by EXIF/best date
 		if order == "asc" {
 			sort.SliceStable(images, func(i, j int) bool {
 				if images[i].ModTime.Equal(images[j].ModTime) {
@@ -444,6 +466,7 @@ func handleImages(w http.ResponseWriter, r *http.Request) {
 	order := q.Get("order")
 	page, _ := strconv.Atoi(q.Get("page"))
 	limit, _ := strconv.Atoi(q.Get("limit"))
+	paginate := q.Has("limit")
 	if page < 1 {
 		page = 1
 	}
@@ -474,18 +497,27 @@ func handleImages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	total := len(cached)
-	start := (page - 1) * limit
-	end := start + limit
-	if start > total {
-		start = total
-	}
-	if end > total {
-		end = total
+	var slice []ImageInfo
+	if paginate {
+		start := (page - 1) * limit
+		end := start + limit
+		if start > total {
+			start = total
+		}
+		if end > total {
+			end = total
+		}
+		slice = cached[start:end]
+	} else {
+		slice = cached
+		page = 1
+		limit = total
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(ListResponse{
-		Images: cached[start:end],
+		Images: slice,
 		Total:  total,
 		Page:   page,
 		Limit:  limit,
@@ -641,24 +673,18 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid filename", http.StatusBadRequest)
 		return
 	}
-	base := strings.TrimSuffix(safeName, ext)
 	destPath := filepath.Join(photosDir, safeName)
 
 	// Use O_EXCL so the existence-check and create are one atomic operation,
 	// avoiding the TOCTOU race of Stat-then-Create.
-	var dst *os.File
-	for {
-		var ferr error
-		dst, ferr = os.OpenFile(destPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		if ferr == nil {
-			break
-		}
-		if !os.IsExist(ferr) {
-			http.Error(w, "failed to create file", http.StatusInternalServerError)
+	dst, ferr := os.OpenFile(destPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if ferr != nil {
+		if os.IsExist(ferr) {
+			http.Error(w, "file already exists", http.StatusConflict)
 			return
 		}
-		safeName = fmt.Sprintf("%s_%d%s", base, time.Now().UnixMilli(), ext)
-		destPath = filepath.Join(photosDir, safeName)
+		http.Error(w, "failed to create file", http.StatusInternalServerError)
+		return
 	}
 	defer dst.Close()
 
@@ -676,6 +702,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		cacheAdd(ImageInfo{
 			Filename:    safeName,
 			ModTime:     bestDate(safeName, fi.ModTime()),
+			FileMtime:   fi.ModTime(),
 			Size:        fi.Size(),
 			ThumbSmall:  small,
 			ThumbMedium: medium,
@@ -818,13 +845,16 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 	saveMetaIndex()
 
 	var size int64
+	var cropMtime time.Time
 	if fi, err := os.Stat(destPath); err == nil {
 		size = fi.Size()
+		cropMtime = fi.ModTime()
 	}
 	small, medium := thumbURLs(newName)
 	cacheAdd(ImageInfo{
 		Filename:    newName,
 		ModTime:     bestDate(newName, time.Now()),
+		FileMtime:   cropMtime,
 		Size:        size,
 		Width:       b.Dx(),
 		Height:      b.Dy(),
@@ -947,6 +977,7 @@ func updateCachedFile(filename string, fi os.FileInfo, addIfMissing bool) {
 	for i, img := range imagesCache {
 		if img.Filename == filename {
 			imagesCache[i].ModTime = bestDate(filename, fi.ModTime())
+			imagesCache[i].FileMtime = fi.ModTime()
 			imagesCache[i].Size = fi.Size()
 			imagesCache[i].Width = meta.Width
 			imagesCache[i].Height = meta.Height
@@ -963,6 +994,7 @@ func updateCachedFile(filename string, fi os.FileInfo, addIfMissing bool) {
 		cacheAdd(ImageInfo{
 			Filename:    filename,
 			ModTime:     bestDate(filename, fi.ModTime()),
+			FileMtime:   fi.ModTime(),
 			Size:        fi.Size(),
 			ThumbSmall:  small,
 			ThumbMedium: medium,
@@ -1123,6 +1155,7 @@ func reconcile() {
 		cacheAdd(ImageInfo{
 			Filename:    name,
 			ModTime:     bestDate(name, fi.ModTime()),
+			FileMtime:   fi.ModTime(),
 			Size:        fi.Size(),
 			ThumbSmall:  small,
 			ThumbMedium: medium,
@@ -1181,6 +1214,7 @@ func envOr(key, fallback string) string {
 // handleConfig returns runtime configuration consumed by the Vue frontend.
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(map[string]string{"title": appTitle})
 }
 

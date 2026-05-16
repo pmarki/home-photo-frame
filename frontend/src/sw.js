@@ -74,12 +74,15 @@ registerRoute(
   })
 )
 
-// Image list: network-first so sorting / new uploads are always fresh
+// Image list: network-first so sorting / new uploads are always fresh.
+// fetchOptions.cache:'no-store' bypasses the browser HTTP cache so the SW
+// always reaches the actual server (not a stale HTTP-cached response).
 registerRoute(
   ({ url }) => url.pathname.startsWith('/api/images'),
   new NetworkFirst({
     cacheName: 'api-v1',
     networkTimeoutSeconds: 5,
+    fetchOptions: { cache: 'no-store' },
     plugins: [new CacheableResponsePlugin({ statuses: [0, 200] })]
   })
 )

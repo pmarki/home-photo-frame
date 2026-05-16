@@ -98,6 +98,10 @@ function uploadFile(file, item) {
           item.savedThumbSmall = d.thumbSmall
         } catch (_) {}
         resolve(true)
+      } else if (xhr.status === 409) {
+        item.state = 'error'
+        item.error = 'File already exists'
+        resolve(false)
       } else {
         item.state = 'error'
         item.error = `Server error ${xhr.status}`
