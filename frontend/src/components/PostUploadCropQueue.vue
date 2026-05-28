@@ -1,7 +1,7 @@
 <template>
   <div v-if="cropError" class="cpq-error-toast" role="alert">{{ cropError }}</div>
   <ImageCropper
-    :src="`/api/original/${encodeURIComponent(current.filename)}`"
+    :src="current.original"
     :filename="current.filename"
     @crop="onCropApplied"
     @cancel="advance"
@@ -33,7 +33,7 @@ async function onCropApplied(rect) {
     })
     if (res.ok) {
       const data = await res.json()
-      queue.value[idx.value] = { filename: data.filename }
+      queue.value[idx.value] = { filename: data.filename, original: data.original }
     } else {
       throw new Error(`Server error ${res.status}`)
     }

@@ -124,6 +124,7 @@ function uploadFile(file, item) {
           const d = JSON.parse(xhr.responseText)
           item.savedFilename = d.filename
           item.savedThumbSmall = d.thumbSmall
+          item.savedOriginal = d.original
         } catch (_) {}
         resolve(true)
       } else {
@@ -161,7 +162,7 @@ async function runUploads(files) {
 function finish(withCrop) {
   const uploaded = withCrop
     ? items.value.filter(i => i.state === 'done' && i.savedFilename)
-        .map(i => ({ filename: i.savedFilename, thumbSmall: i.savedThumbSmall }))
+        .map(i => ({ filename: i.savedFilename, thumbSmall: i.savedThumbSmall, original: i.savedOriginal }))
     : []
   emit('done', uploaded)
 }

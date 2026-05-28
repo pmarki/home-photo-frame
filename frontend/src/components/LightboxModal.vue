@@ -1,7 +1,7 @@
 <template>
   <ImageCropper
     v-if="cropping"
-    :src="`/api/original/${encodeURIComponent(currentImage.filename)}`"
+    :src="currentImage.original"
     :filename="currentImage.filename"
     @crop="applyCrop"
     @cancel="cropping = false"
@@ -88,7 +88,7 @@
         <div class="lb-image-wrap" :key="currentIndex">
           <video
             v-if="isVideo(currentImage.filename)"
-            :src="`/api/original/${encodeURIComponent(currentImage.filename)}`"
+            :src="currentImage.original"
             class="lb-image"
             :class="{ loaded: imgLoaded }"
             autoplay muted loop playsinline controls
@@ -97,7 +97,7 @@
           />
           <img
             v-else
-            :src="`/api/original/${encodeURIComponent(currentImage.filename)}`"
+            :src="currentImage.original"
             :alt="currentImage.filename"
             class="lb-image"
             :class="{ loaded: imgLoaded }"
@@ -164,7 +164,7 @@ async function shareOrDownload() {
   if (sharing.value) return
   sharing.value = true
   const img = currentImage.value
-  const url = `/api/original/${encodeURIComponent(img.filename)}`
+  const url = img.original
   try {
     if (canShare) {
       const res = await fetch(url)

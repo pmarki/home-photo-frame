@@ -18,7 +18,7 @@ Drop images into a folder, get a fast infinite-scroll gallery with full-screen l
 ## Features
 
 - **Infinite scroll** — 150 images per page, prefetches before reaching the bottom
-- **Thumbnail cache** — content-addressed JPEG thumbnails (400 px small, configurable medium); generated on demand and cached on disk; URL hash changes on file modification so browsers never show stale images
+- **Thumbnail cache** — JPEG thumbnails (400 px small, configurable medium) cached under `cache/s/` and `cache/m/` using the original filename; URL hash changes on file modification so browsers never show stale thumbnails or originals
 - **File watcher** — detects images added, edited, or removed externally (inotify) and keeps the in-memory index in sync without a restart
 - **Nightly reconcile** — runs at 03:00 local time to catch any drift between disk, in-memory cache, and metadata (handles missed watcher events, external deletions, etc.)
 - **Lightbox** — full-screen viewer, swipe/keyboard navigation, slide transitions
@@ -176,13 +176,13 @@ Open **http://localhost:5173** — Vite proxies `/api` requests to the Go backen
 | `GET` | `/api/config` | Runtime config: `{"title": "..."}` |
 | `GET` | `/api/thumb/{hash}/{filename}` | 400 px thumbnail (JPEG, content-addressed, 1-year cache) |
 | `GET` | `/api/thumb-medium/{hash}/{filename}` | Medium thumbnail up to `MEDIUM_WIDTH` px wide |
-| `GET` | `/api/original/{filename}` | Original unmodified file |
+| `GET` | `/api/original/{hash}/{filename}` | Original unmodified file (1-year immutable cache); falls back to `/api/original/{filename}` with 1-hour cache for backward compat |
 | `POST` | `/api/upload` | Upload a single image (`multipart/form-data`, field `file`) |
 | `POST` | `/api/crop/{filename}` | Crop image. Body: `{"x","y","width","height"}` in pixels |
 | `DELETE` | `/api/delete/{filename}` | Delete image and its thumbnail cache |
 | `GET/POST` | `/manifest.webmanifest` | PWA manifest with `name`/`short_name` injected from `-title` |
 
-Thumbnail URLs are content-addressed: the hash component encodes the source filename and OS mtime. When a file is modified externally the hash changes, so browsers automatically fetch a fresh thumbnail while old ones remain permanently cacheable.
+Thumbnail and original URLs are content-addressed: the hash component encodes the source filename and OS mtime. When a file is modified externally the hash changes, so browsers automatically fetch fresh content while old responses remain permanently cacheable.
 
 ### GET /api/images
 
@@ -216,7 +216,8 @@ GET /api/images?sort=date&order=desc&limit=20&page=2  # page 2, 20 per page
       "width":       4032,
       "height":      3024,
       "thumbSmall":  "/api/thumb/a3f1c9d2e4b5a6c7/20240318_132033_holiday.jpg",
-      "thumbMedium": "/api/thumb-medium/a3f1c9d2e4b5a6c7/20240318_132033_holiday.jpg"
+      "thumbMedium": "/api/thumb-medium/a3f1c9d2e4b5a6c7/20240318_132033_holiday.jpg",
+      "original":    "/api/original/a3f1c9d2e4b5a6c7/20240318_132033_holiday.jpg"
     }
   ],
   "total": 142,
@@ -229,12 +230,13 @@ GET /api/images?sort=date&order=desc&limit=20&page=2  # page 2, 20 per page
 
 | Field | Type | Description |
 |---|---|---|
-| `filename` | string | Filename within the photos directory; use as the path component for `/api/original/` and `/api/crop/` |
+| `filename` | string | Filename within the photos directory; use as the path component for `/api/crop/` and `/api/delete/` |
 | `modTime` | RFC 3339 | Best available date (EXIF → filename → mtime). Use this for display and chronological ordering |
 | `size` | integer | File size in bytes |
 | `width`, `height` | integer | Original image dimensions in pixels (0 if not yet indexed) |
 | `thumbSmall` | string | URL of the 400 px thumbnail; ready to use in an `<img src>` |
 | `thumbMedium` | string | URL of the medium-res thumbnail (default 2000 px wide); suitable for a full-screen slideshow |
+| `original` | string | Hash-based URL of the original file; immutable-cached, changes when the source file changes |
 | `total` | integer | Total number of images across all pages |
 | `page` | integer | Current page |
 | `limit` | integer | Page size used for this response |
@@ -302,7 +304,7 @@ Install the PWA from Chrome on Android ("Add to Home Screen"). After installatio
 │           ├── ShareUploader.vue     per-file upload progress (Android share target)
 │           └── PostUploadCropQueue.vue  post-upload crop queue
 ├── photos/                   source images (not committed)
-└── cache/                    thumbnail cache + meta.json (not committed)
+└── cache/                    thumbnail cache (s/{filename}, m/{filename}) + meta.json (not committed)
 ```
 
 ## Makefile targets

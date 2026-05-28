@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -283,7 +284,7 @@ func buildImagesCache() {
 		if fileMtime.IsZero() {
 			fileMtime = fi.ModTime()
 		}
-		small, medium := thumbURLs(e.Name())
+		small, medium, original := thumbURLs(e.Name())
 		list = append(list, ImageInfo{
 			Filename:    e.Name(),
 			ModTime:     bestDate(e.Name(), fi.ModTime()),
@@ -293,6 +294,7 @@ func buildImagesCache() {
 			Height:      meta.Height,
 			ThumbSmall:  small,
 			ThumbMedium: medium,
+			Original:    original,
 		})
 	}
 	imagesCacheMu.Lock()
@@ -327,7 +329,7 @@ func cacheRemove(filename string) {
 }
 
 func cacheUpdateDimensions(filename string, w, h int) {
-	small, medium := thumbURLs(filename)
+	small, medium, original := thumbURLs(filename)
 	imagesCacheMu.Lock()
 	for i, img := range imagesCache {
 		if img.Filename == filename {
@@ -335,6 +337,7 @@ func cacheUpdateDimensions(filename string, w, h int) {
 			imagesCache[i].Height = h
 			imagesCache[i].ThumbSmall = small
 			imagesCache[i].ThumbMedium = medium
+			imagesCache[i].Original = original
 			break
 		}
 	}
@@ -353,6 +356,7 @@ type ImageInfo struct {
 	Height      int       `json:"height,omitempty"`
 	ThumbSmall  string    `json:"thumbSmall"`
 	ThumbMedium string    `json:"thumbMedium"`
+	Original    string    `json:"original"`
 }
 
 type ListResponse struct {
@@ -372,17 +376,19 @@ func thumbHash(filename string, mtime time.Time) string {
 	return hex.EncodeToString(h[:8])
 }
 
-func thumbSmallCachePath(hash string) string {
-	return filepath.Join(cacheDir, hash+".jpg")
+func thumbSmallCachePath(filename string) string {
+	return filepath.Join(cacheDir, "s", filename)
 }
 
-func thumbMediumCachePath(hash string) string {
-	return filepath.Join(cacheDir, hash+"-medium.jpg")
+func thumbMediumCachePath(filename string) string {
+	return filepath.Join(cacheDir, "m", filename)
 }
 
-// thumbURLs returns the API URLs for the small and medium thumbnails of filename.
-// It reads FileMtime from metaIndex; if not yet recorded it falls back to os.Stat.
-func thumbURLs(filename string) (small, medium string) {
+// thumbURLs returns the API URLs for the small thumbnail, medium thumbnail, and
+// original of filename. It reads FileMtime from metaIndex; if not yet recorded
+// it falls back to os.Stat. The hash in each URL changes when the source file's
+// mtime changes, ensuring browsers fetch fresh content after an edit.
+func thumbURLs(filename string) (small, medium, original string) {
 	metaMu.RLock()
 	meta := metaIndex[filename]
 	metaMu.RUnlock()
@@ -394,7 +400,9 @@ func thumbURLs(filename string) (small, medium string) {
 	}
 	h := thumbHash(filename, mtime)
 	enc := url.PathEscape(filename)
-	return "/api/thumb/" + h + "/" + enc, "/api/thumb-medium/" + h + "/" + enc
+	return "/api/thumb/" + h + "/" + enc,
+		"/api/thumb-medium/" + h + "/" + enc,
+		"/api/original/" + h + "/" + enc
 }
 
 // recoveryMiddleware catches panics in HTTP handlers, logs them with a stack
@@ -598,12 +606,12 @@ func serveCachedThumb(
 	transform func(image.Image) image.Image,
 	quality int,
 ) {
-	hash, filename, ok := parseThumbPath(prefix, r.URL.Path)
+	_, filename, ok := parseThumbPath(prefix, r.URL.Path)
 	if !ok {
 		http.Error(w, "invalid", http.StatusBadRequest)
 		return
 	}
-	cp := cachePath(hash)
+	cp := cachePath(filename)
 
 	// Cache hit: URL is content-addressed, safe to cache forever.
 	if _, err := os.Stat(cp); err == nil {
@@ -683,12 +691,21 @@ func handleThumbMedium(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleOriginal(w http.ResponseWriter, r *http.Request) {
-	filename := strings.TrimPrefix(r.URL.Path, "/api/original/")
+	rest := strings.TrimPrefix(r.URL.Path, "/api/original/")
+	slash := strings.IndexByte(rest, '/')
+	var filename, cacheControl string
+	if slash < 0 {
+		filename = rest
+		cacheControl = "public, max-age=3600"
+	} else {
+		filename = rest[slash+1:]
+		cacheControl = "public, max-age=31536000, immutable"
+	}
 	if !isValidFilename(filename) {
 		http.Error(w, "invalid filename", http.StatusBadRequest)
 		return
 	}
-	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.Header().Set("Cache-Control", cacheControl)
 	http.ServeFile(w, r, filepath.Join(photosDir, filename))
 }
 
@@ -745,7 +762,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	indexImage(safeName, 0, 0)
 	saveMetaIndex()
 
-	small, medium := thumbURLs(safeName)
+	small, medium, original := thumbURLs(safeName)
 	if fi, err := os.Stat(destPath); err == nil {
 		cacheAdd(ImageInfo{
 			Filename:    safeName,
@@ -754,6 +771,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 			Size:        fi.Size(),
 			ThumbSmall:  small,
 			ThumbMedium: medium,
+			Original:    original,
 		})
 	}
 
@@ -762,6 +780,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		"filename":    safeName,
 		"thumbSmall":  small,
 		"thumbMedium": medium,
+		"original":    original,
 	})
 }
 
@@ -776,10 +795,6 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	srcPath := filepath.Join(photosDir, filename)
-	// Capture thumb hash before removing from meta.
-	metaMu.RLock()
-	thumbH := thumbHash(filename, metaIndex[filename].FileMtime)
-	metaMu.RUnlock()
 
 	if err := os.Remove(srcPath); err != nil {
 		if os.IsNotExist(err) {
@@ -789,8 +804,8 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	os.Remove(thumbSmallCachePath(thumbH))
-	os.Remove(thumbMediumCachePath(thumbH))
+	os.Remove(thumbSmallCachePath(filename))
+	os.Remove(thumbMediumCachePath(filename))
 	fileMu.Delete(filename)
 	fileMu.Delete("medium:" + filename)
 	metaMu.Lock()
@@ -800,6 +815,105 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 	saveMetaIndex()
 	log.Printf("delete: %s", srcPath)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// extractJPEGApp1 returns the raw APP1 (EXIF) marker segment from a JPEG,
+// or nil if the file has no EXIF APP1.
+func extractJPEGApp1(data []byte) []byte {
+	if len(data) < 2 || data[0] != 0xFF || data[1] != 0xD8 {
+		return nil
+	}
+	i := 2
+	for i+3 < len(data) {
+		if data[i] != 0xFF {
+			return nil
+		}
+		marker := data[i+1]
+		if marker == 0xD9 || marker == 0xDA {
+			return nil
+		}
+		segLen := int(data[i+2])<<8 | int(data[i+3])
+		end := i + 2 + segLen
+		if end > len(data) {
+			return nil
+		}
+		if marker == 0xE1 && segLen >= 8 && string(data[i+4:i+10]) == "Exif\x00\x00" {
+			return data[i:end]
+		}
+		i = end
+	}
+	return nil
+}
+
+// resetExifOrientation returns a copy of an APP1 segment with two changes:
+//  1. The IFD0 orientation tag is set to 1 (TopLeft / no rotation), because
+//     imaging.AutoOrientation has already baked the rotation into the pixels.
+//  2. The IFD1 next-pointer is zeroed, dropping the stale embedded JPEG
+//     thumbnail. Without this, file managers extract the pre-crop, pre-rotate
+//     thumbnail and display it in the wrong orientation.
+func resetExifOrientation(app1 []byte) []byte {
+	if len(app1) < 18 {
+		return app1
+	}
+	// TIFF data begins at byte 10: FF E1 (2) + length (2) + "Exif\0\0" (6)
+	tiff := app1[10:]
+	if len(tiff) < 8 {
+		return app1
+	}
+	var bo binary.ByteOrder
+	switch string(tiff[:2]) {
+	case "II":
+		bo = binary.LittleEndian
+	case "MM":
+		bo = binary.BigEndian
+	default:
+		return app1
+	}
+	if bo.Uint16(tiff[2:4]) != 42 {
+		return app1
+	}
+	ifd0 := int(bo.Uint32(tiff[4:8]))
+	if ifd0+2 > len(tiff) {
+		return app1
+	}
+	n := int(bo.Uint16(tiff[ifd0:]))
+
+	out := make([]byte, len(app1))
+	copy(out, app1)
+	tiffOut := out[10:]
+
+	// 1. Reset orientation tag to TopLeft.
+	for i := range n {
+		off := ifd0 + 2 + i*12
+		if off+12 > len(tiff) {
+			break
+		}
+		if bo.Uint16(tiff[off:]) == 0x0112 {
+			bo.PutUint16(tiffOut[off+8:], 1)
+			break
+		}
+	}
+
+	// 2. Zero the IFD1 next-pointer (4 bytes immediately after IFD0 entries).
+	nextPtr := ifd0 + 2 + n*12
+	if nextPtr+4 <= len(tiff) {
+		bo.PutUint32(tiffOut[nextPtr:], 0)
+	}
+
+	return out
+}
+
+// injectJPEGApp1 inserts an APP1 segment immediately after the SOI marker of
+// a JPEG byte slice and returns the result.
+func injectJPEGApp1(dst, app1 []byte) []byte {
+	if len(dst) < 2 {
+		return dst
+	}
+	out := make([]byte, 0, len(dst)+len(app1))
+	out = append(out, dst[:2]...)  // SOI
+	out = append(out, app1...)     // EXIF APP1
+	out = append(out, dst[2:]...)  // remainder
+	return out
 }
 
 func handleCrop(w http.ResponseWriter, r *http.Request) {
@@ -836,13 +950,20 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	img, err := imaging.Open(srcPath, imaging.AutoOrientation(true))
+	// Read raw bytes first so we can copy EXIF into the re-encoded file.
+	originalData, err := os.ReadFile(srcPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.Error(w, "image not found", http.StatusNotFound)
 		} else {
-			http.Error(w, "failed to decode image", http.StatusInternalServerError)
+			http.Error(w, "failed to read image", http.StatusInternalServerError)
 		}
+		return
+	}
+
+	img, err := imaging.Decode(bytes.NewReader(originalData), imaging.AutoOrientation(true))
+	if err != nil {
+		http.Error(w, "failed to decode image", http.StatusInternalServerError)
 		return
 	}
 
@@ -863,66 +984,82 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cropped := imaging.Crop(img, image.Rect(x0, y0, x1, y1))
+	b := cropped.Bounds()
 
-	// Save as a new file: {base}_crop_{timestamp}{ext}
-	ext := filepath.Ext(filename)
-	base := strings.TrimSuffix(filename, ext)
-	newName := fmt.Sprintf("%s_crop_%d%s", base, time.Now().UnixMilli(), ext)
-	destPath := filepath.Join(photosDir, newName)
-
-	if err := imaging.Save(cropped, destPath); err != nil {
-		http.Error(w, "failed to save cropped image", http.StatusInternalServerError)
+	// Encode to a buffer, then atomically replace the source file.
+	// Using srcPath+".tmp" keeps the temp file on the same filesystem so
+	// os.Rename is atomic; the ".tmp" extension is not in supportedExts so
+	// the file watcher ignores it.
+	format, err := imaging.FormatFromFilename(srcPath)
+	if err != nil {
+		format = imaging.JPEG
+	}
+	var buf bytes.Buffer
+	if err := imaging.Encode(&buf, cropped, format); err != nil {
+		http.Error(w, "failed to encode cropped image", http.StatusInternalServerError)
+		return
+	}
+	outData := buf.Bytes()
+	if format == imaging.JPEG {
+		if app1 := extractJPEGApp1(originalData); app1 != nil {
+			outData = injectJPEGApp1(outData, resetExifOrientation(app1))
+		}
+	}
+	tmpPath := srcPath + ".tmp"
+	if err := os.WriteFile(tmpPath, outData, 0o644); err != nil {
+		http.Error(w, "failed to write temp file", http.StatusInternalServerError)
+		return
+	}
+	if err := os.Rename(tmpPath, srcPath); err != nil {
+		os.Remove(tmpPath)
+		http.Error(w, "failed to replace image", http.StatusInternalServerError)
 		return
 	}
 
-	b := cropped.Bounds()
-	indexImage(newName, b.Dx(), b.Dy())
-
-	// Delete the original and its thumbnails.
-	metaMu.RLock()
-	origThumbH := thumbHash(filename, metaIndex[filename].FileMtime)
-	metaMu.RUnlock()
-	os.Remove(srcPath)
-	os.Remove(thumbSmallCachePath(origThumbH))
-	os.Remove(thumbMediumCachePath(origThumbH))
-	metaMu.Lock()
-	delete(metaIndex, filename)
-	metaMu.Unlock()
-	cacheRemove(filename)
-
+	// Evict stale thumbnail caches and update metadata with new dimensions.
+	os.Remove(thumbSmallCachePath(filename))
+	os.Remove(thumbMediumCachePath(filename))
+	indexImage(filename, b.Dx(), b.Dy())
 	saveMetaIndex()
 
-	var size int64
-	var cropMtime time.Time
-	if fi, err := os.Stat(destPath); err == nil {
-		size = fi.Size()
-		cropMtime = fi.ModTime()
-	}
-	small, medium := thumbURLs(newName)
-	cacheAdd(ImageInfo{
-		Filename:    newName,
-		ModTime:     bestDate(newName, time.Now()),
-		FileMtime:   cropMtime,
-		Size:        size,
-		Width:       b.Dx(),
-		Height:      b.Dy(),
-		ThumbSmall:  small,
-		ThumbMedium: medium,
-	})
+	fi, statErr := os.Stat(srcPath)
+	small, medium, original := thumbURLs(filename)
 
-	log.Printf("crop: %s → %s (%dx%d), original deleted", filename, newName, b.Dx(), b.Dy())
+	imagesCacheMu.Lock()
+	for i, entry := range imagesCache {
+		if entry.Filename == filename {
+			if statErr == nil {
+				imagesCache[i].Size = fi.Size()
+				imagesCache[i].FileMtime = fi.ModTime()
+				imagesCache[i].ModTime = bestDate(filename, fi.ModTime())
+			}
+			imagesCache[i].Width = b.Dx()
+			imagesCache[i].Height = b.Dy()
+			imagesCache[i].ThumbSmall = small
+			imagesCache[i].ThumbMedium = medium
+			imagesCache[i].Original = original
+			sortedCache = nil
+			break
+		}
+	}
+	imagesCacheMu.Unlock()
+
+	log.Printf("crop: %s (%dx%d)", filename, b.Dx(), b.Dy())
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"filename":    newName,
+		"filename":    filename,
 		"width":       b.Dx(),
 		"height":      b.Dy(),
 		"thumbSmall":  small,
 		"thumbMedium": medium,
+		"original":    original,
 	})
 }
 
 func warmupThumbnails() {
+	log.Println("warmup: cache pre-warming started")
+	defer log.Println("warmup: all thumbnails ready")
 	entries, err := os.ReadDir(photosDir)
 	if err != nil {
 		return
@@ -954,21 +1091,22 @@ func warmupThumbnails() {
 		mtimeChanged := !meta.FileMtime.Equal(fileMtime)
 		hasDims := meta.Width > 0
 
-		// Compute the expected hash-based thumb path.
-		h := thumbHash(name, fileMtime)
-		cp := thumbSmallCachePath(h)
-		needsThumb := func() bool {
-			_, err := os.Stat(cp)
+		needsSmall := func() bool {
+			_, err := os.Stat(thumbSmallCachePath(name))
+			return err != nil
+		}()
+		needsMedium := func() bool {
+			_, err := os.Stat(thumbMediumCachePath(name))
 			return err != nil
 		}()
 
-		if hasDims && !needsThumb && !mtimeChanged {
+		if hasDims && !needsSmall && !needsMedium && !mtimeChanged {
 			continue
 		}
 
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(filename string, genThumb bool) {
+		go func(filename string, genSmall, genMedium bool) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
@@ -981,26 +1119,31 @@ func warmupThumbnails() {
 			}
 			b := img.Bounds()
 			indexImage(filename, b.Dx(), b.Dy()) // updates FileMtime in meta
-			if !genThumb {
-				return
+			if genSmall {
+				thumb := imaging.Fit(img, thumbnailSize, thumbnailSize, imaging.Lanczos)
+				if f, err := os.Create(thumbSmallCachePath(filename)); err == nil {
+					jpeg.Encode(f, thumb, &jpeg.Options{Quality: 85}) //nolint:errcheck
+					f.Close()
+				}
 			}
-			// Recompute hash using the now-updated FileMtime in meta.
-			metaMu.RLock()
-			updatedMtime := metaIndex[filename].FileMtime
-			metaMu.RUnlock()
-			thumbPath := thumbSmallCachePath(thumbHash(filename, updatedMtime))
-			thumb := imaging.Fit(img, thumbnailSize, thumbnailSize, imaging.Lanczos)
-			if f, err := os.Create(thumbPath); err == nil {
-				jpeg.Encode(f, thumb, &jpeg.Options{Quality: 85}) //nolint:errcheck
-				f.Close()
+			if genMedium {
+				var thumb image.Image
+				if b.Dx() > mediumWidth {
+					thumb = imaging.Resize(img, mediumWidth, 0, imaging.Lanczos)
+				} else {
+					thumb = img
+				}
+				if f, err := os.Create(thumbMediumCachePath(filename)); err == nil {
+					jpeg.Encode(f, thumb, &jpeg.Options{Quality: 90}) //nolint:errcheck
+					f.Close()
+				}
 			}
-		}(name, needsThumb || mtimeChanged)
+		}(name, needsSmall || mtimeChanged, needsMedium || mtimeChanged)
 	}
 	wg.Wait()
 	saveMetaIndex()
 	// Rebuild cache after warmup to pick up newly discovered dimensions and URLs.
 	buildImagesCache()
-	log.Println("warmup: all thumbnails ready")
 }
 
 // updateCachedFile refreshes in-memory state for a file that was created or
@@ -1008,14 +1151,11 @@ func warmupThumbnails() {
 // imagesCache. When addIfMissing is true the file is also added to the cache
 // if it was not already present (used for Create events).
 func updateCachedFile(filename string, fi os.FileInfo, addIfMissing bool) {
-	metaMu.RLock()
-	oldH := thumbHash(filename, metaIndex[filename].FileMtime)
-	metaMu.RUnlock()
-	os.Remove(thumbSmallCachePath(oldH))
-	os.Remove(thumbMediumCachePath(oldH))
+	os.Remove(thumbSmallCachePath(filename))
+	os.Remove(thumbMediumCachePath(filename))
 	indexImage(filename, 0, 0)
 	saveMetaIndex()
-	small, medium := thumbURLs(filename)
+	small, medium, original := thumbURLs(filename)
 	metaMu.RLock()
 	meta := metaIndex[filename]
 	metaMu.RUnlock()
@@ -1031,6 +1171,7 @@ func updateCachedFile(filename string, fi os.FileInfo, addIfMissing bool) {
 			imagesCache[i].Height = meta.Height
 			imagesCache[i].ThumbSmall = small
 			imagesCache[i].ThumbMedium = medium
+			imagesCache[i].Original = original
 			sortedCache = nil
 			found = true
 			break
@@ -1046,6 +1187,7 @@ func updateCachedFile(filename string, fi os.FileInfo, addIfMissing bool) {
 			Size:        fi.Size(),
 			ThumbSmall:  small,
 			ThumbMedium: medium,
+			Original:    original,
 		})
 		log.Printf("watcher: added %s", filename)
 	} else {
@@ -1108,11 +1250,8 @@ func watchPhotosDir() {
 						updateCachedFile(filename, fi, false)
 
 					case event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename):
-						metaMu.RLock()
-						oldH := thumbHash(filename, metaIndex[filename].FileMtime)
-						metaMu.RUnlock()
-						os.Remove(thumbSmallCachePath(oldH))
-						os.Remove(thumbMediumCachePath(oldH))
+						os.Remove(thumbSmallCachePath(filename))
+						os.Remove(thumbMediumCachePath(filename))
 						fileMu.Delete(filename)
 						fileMu.Delete("medium:" + filename)
 						metaMu.Lock()
@@ -1178,11 +1317,8 @@ func reconcile() {
 
 	// Evict stale entries without holding imagesCacheMu across metaMu.
 	for _, name := range stale {
-		metaMu.RLock()
-		h := thumbHash(name, metaIndex[name].FileMtime)
-		metaMu.RUnlock()
-		os.Remove(thumbSmallCachePath(h))
-		os.Remove(thumbMediumCachePath(h))
+		os.Remove(thumbSmallCachePath(name))
+		os.Remove(thumbMediumCachePath(name))
 		fileMu.Delete(name)
 		fileMu.Delete("medium:" + name)
 		cacheRemove(name)
@@ -1199,7 +1335,7 @@ func reconcile() {
 			continue
 		}
 		indexImage(name, 0, 0)
-		small, medium := thumbURLs(name)
+		small, medium, original := thumbURLs(name)
 		cacheAdd(ImageInfo{
 			Filename:    name,
 			ModTime:     bestDate(name, fi.ModTime()),
@@ -1207,6 +1343,7 @@ func reconcile() {
 			Size:        fi.Size(),
 			ThumbSmall:  small,
 			ThumbMedium: medium,
+			Original:    original,
 		})
 		log.Printf("reconcile: added missing file %s", name)
 		changed = true
@@ -1380,7 +1517,7 @@ func main() {
 		*p = abs
 	}
 
-	for _, dir := range []string{cacheDir, photosDir} {
+	for _, dir := range []string{cacheDir, photosDir, filepath.Join(cacheDir, "s"), filepath.Join(cacheDir, "m")} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			log.Fatalf("cannot create directory %s: %v", dir, err)
 		}
