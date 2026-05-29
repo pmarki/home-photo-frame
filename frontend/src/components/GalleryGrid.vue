@@ -67,7 +67,7 @@ const props = defineProps({
 
 const emit = defineEmits(['load-more', 'open'])
 
-const isVideo = (filename) => filename?.toLowerCase().endsWith('.mp4')
+const isVideo = (filename) => /\.(mp4|webm|mov|m4v)$/i.test(filename ?? '')
 
 const sentinel = ref(null)
 let observer = null

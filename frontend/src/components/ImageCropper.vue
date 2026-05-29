@@ -20,7 +20,9 @@
         class="cropper-img"
         draggable="false"
         @load="onImgLoad"
+        @error="imgLoadError = true"
       />
+      <div v-if="imgLoadError" class="cropper-load-error">Failed to load image</div>
 
       <!-- Crop box (box-shadow provides the dark overlay around it) -->
       <div
@@ -45,7 +47,7 @@
     <!-- Footer -->
     <div class="cropper-footer">
       <button class="btn-cancel" @click="$emit('cancel')">Cancel</button>
-      <button class="btn-crop" :disabled="!sel" @click="confirmCrop">Apply Crop</button>
+      <button class="btn-crop" :disabled="!sel || imgLoadError" @click="confirmCrop">Apply Crop</button>
     </div>
 
   </div>
@@ -74,6 +76,7 @@ const imgDispW = ref(1)
 const imgDispH = ref(1)
 // Current selection in stage coordinates { x, y, w, h }
 const sel = ref(null)
+const imgLoadError = ref(false)
 
 // Active drag: { type, startX, startY, startSel }
 // type is 'new' | 'move' | 'nw'|'n'|'ne'|'e'|'se'|'s'|'sw'|'w'
@@ -328,6 +331,19 @@ onUnmounted(() => {
   pointer-events: none;
   user-select: none;
   -webkit-user-drag: none;
+}
+
+/* ─── Load error ────────────────────────────────────────────────────── */
+.cropper-load-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #f87171;
+  font-size: 0.9rem;
+  background: rgba(0, 0, 0, 0.6);
+  pointer-events: none;
 }
 
 /* ─── Crop box ──────────────────────────────────────────────────────── */

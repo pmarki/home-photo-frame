@@ -6,6 +6,8 @@ Drop images into a folder, get a fast infinite-scroll gallery with full-screen l
 
 > **No built-in authentication.** The app is designed to run behind a reverse proxy or identity-aware access layer — [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/), Tailscale, nginx with Basic Auth, Authelia, etc. Do not expose port 8080 directly to the internet.
 
+> The server sets `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, and `Referrer-Policy: same-origin` on all responses, and enforces read/write/idle timeouts on HTTP connections.
+
 ## Stack
 
 | Layer | Tech |
@@ -24,11 +26,11 @@ Drop images into a folder, get a fast infinite-scroll gallery with full-screen l
 - **Lightbox** — full-screen viewer, swipe/keyboard navigation, slide transitions
 - **In-app crop** — drag-to-select crop UI; saves a new file, deletes the original
 - **Delete** — two-tap confirmation in the lightbox
-- **Upload** — drag-and-drop or file picker with per-file progress bar; optional post-upload crop queue
+- **Upload** — drag-and-drop or file picker with per-file progress bar; chunked (1.5 MB/chunk) so uploads survive slow connections and proxy read-timeouts; 500 MB per-file cap enforced server-side; retry button for failed files; optional post-upload crop queue
 - **Sort** — by filename or photo date (EXIF → filename pattern → mtime), ascending or descending; persisted to localStorage
 - **Share original** — Web Share API (file blob) on mobile; download fallback on desktop
 - **Android share target** — share photos *into* the app from any Android app; the service worker intercepts the POST, stores files in the Cache API, the app shows per-file upload progress
-- **PWA** — installable, offline shell via Workbox precaching
+- **PWA** — installable, offline shell via Workbox precaching; `/api/config` (title, colours) is cached by the service worker and in `localStorage` so the app loads with the correct theme instantly, even offline
 - **Multi-instance** — configurable title and PWA manifest name so two parallel instances (e.g. prod + test) appear as distinct installed apps
 
 ## Quickstart
@@ -54,7 +56,9 @@ photos/
 └── ...
 ```
 
-Supported formats: **JPEG, PNG, GIF, WebP**
+Supported image formats: **JPEG, PNG, GIF, WebP**
+
+Video formats (requires `-video` / `VIDEO=1`): **MP4, WebM, MOV, M4V**
 
 ### Production (single binary)
 
@@ -74,7 +78,7 @@ make build          # builds frontend, compiles binary with embedded assets
 | `-medium-width` | `MEDIUM_WIDTH` | `2000` | Max pixel width for medium thumbnails used in the lightbox |
 | `-bg-color` | `BG_COLOR` | `#0a0a0f` | Primary background hex colour; header and letterbox areas are derived from it automatically |
 | `-icons-dir` | `ICONS_DIR` | *(embedded)* | Directory with custom `icon-192.png` / `icon-512.png`; falls back to built-in icons when unset |
-| `-video` | `VIDEO` | `false` | Enable MP4 upload, video thumbnails, and in-browser playback. Requires `ffmpeg` in `PATH` (`VIDEO=1`) |
+| `-video` | `VIDEO` | `false` | Enable video upload, thumbnails (via ffmpeg), and in-browser playback. Accepted formats: `.mp4`, `.webm`, `.mov`, `.m4v`. Requires `ffmpeg` in `PATH` (`VIDEO=1`) |
 
 The binary is fully self-contained — copy it anywhere with a `photos/` folder alongside and it works.
 
@@ -177,7 +181,7 @@ Open **http://localhost:5173** — Vite proxies `/api` requests to the Go backen
 | `GET` | `/api/thumb/{hash}/{filename}` | 400 px thumbnail (JPEG, content-addressed, 1-year cache) |
 | `GET` | `/api/thumb-medium/{hash}/{filename}` | Medium thumbnail up to `MEDIUM_WIDTH` px wide |
 | `GET` | `/api/original/{hash}/{filename}` | Original unmodified file (1-year immutable cache); falls back to `/api/original/{filename}` with 1-hour cache for backward compat |
-| `POST` | `/api/upload` | Upload a single image (`multipart/form-data`, field `file`) |
+| `POST` | `/api/upload` | Upload an image — single-file or chunked (see below) |
 | `POST` | `/api/crop/{filename}` | Crop image. Body: `{"x","y","width","height"}` in pixels |
 | `DELETE` | `/api/delete/{filename}` | Delete image and its thumbnail cache |
 | `GET/POST` | `/manifest.webmanifest` | PWA manifest with `name`/`short_name` injected from `-title` |
@@ -241,6 +245,33 @@ GET /api/images?sort=date&order=desc&limit=20&page=2  # page 2, 20 per page
 | `page` | integer | Current page |
 | `limit` | integer | Page size used for this response |
 
+### POST /api/upload
+
+Accepts `multipart/form-data`. Two modes:
+
+**Single-file** (legacy, for small files or direct API use):
+- `file` — the image blob
+
+**Chunked** (used by the built-in upload UI — survives slow connections and proxy read-timeouts):
+- `file` — one chunk blob (up to 1.5 MB recommended)
+- `uploadId` — a UUID string that groups chunks into one upload session
+- `chunkIndex` — 0-based chunk number
+- `totalChunks` — total number of chunks for this file
+- `filename` — original filename (used for extension validation and final assembly)
+
+Intermediate chunks return `{"status":"chunk_ok"}`. The final chunk (and single-file uploads) return the same JSON:
+
+```json
+{
+  "filename":    "photo.jpg",
+  "thumbSmall":  "/api/thumb/a3f1c9d2e4b5a6c7/photo.jpg",
+  "thumbMedium": "/api/thumb-medium/a3f1c9d2e4b5a6c7/photo.jpg",
+  "original":    "/api/original/a3f1c9d2e4b5a6c7/photo.jpg"
+}
+```
+
+Returns `409 Conflict` if a file with that name already exists. The total request body is capped at **500 MB**; exceeding it returns `413`.
+
 **Slideshow recipe** — omit `limit` to get all images in one request, then cycle through `thumbMedium` URLs (or `original`) at whatever interval you like. Re-fetch nightly to pick up new photos.
 
 ```python
@@ -260,7 +291,7 @@ for img in images:
 
 ## PWA & Android Share Target
 
-Install the PWA from Chrome on Android ("Add to Home Screen"). After installation the app appears in the Android share sheet for images.
+Install the PWA from Chrome on Android ("Add to Home Screen"). After installation the app appears in the Android share sheet for images and (when `-video` is enabled) videos.
 
 **Share flow:**
 1. User shares a photo from Gallery / Camera / any app → selects *Photo Frame*

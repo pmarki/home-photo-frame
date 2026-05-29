@@ -39,7 +39,7 @@ async function onCropApplied(rect) {
     }
   } catch (e) {
     console.error('crop failed:', e)
-    cropError.value = 'Crop failed — skipping'
+    cropError.value = `Crop failed for "${filename}" — skipping`
     setTimeout(() => { cropError.value = '' }, 3000)
   }
   advance()

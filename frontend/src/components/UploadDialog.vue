@@ -41,6 +41,7 @@
           {{ doneCount }} saved<template v-if="errorCount">, {{ errorCount }} failed</template>
         </span>
         <div v-if="allDone" class="su-footer-actions">
+          <button v-if="errorCount > 0" class="su-btn su-btn-retry" @click="retryFailed">Retry failed</button>
           <button class="su-btn su-btn-secondary" @click="finish(false)">Done</button>
           <button v-if="doneCount > 0" class="su-btn su-btn-primary" @click="finish(true)">Crop</button>
         </div>
@@ -79,44 +80,55 @@ const statusLine = computed(() => {
   return `Uploading ${active + 1} of ${items.value.length}…`
 })
 
-function uploadFile(file, item) {
+const CHUNK_SIZE = 1.5 * 1024 * 1024  // 1.5 MB per chunk
+
+function sendChunk(chunk, uploadId, chunkIndex, totalChunks, filename, item) {
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest()
     const form = new FormData()
-    form.append('file', file)
+    form.append('file', chunk)
+    form.append('uploadId', uploadId)
+    form.append('chunkIndex', String(chunkIndex))
+    form.append('totalChunks', String(totalChunks))
+    form.append('filename', filename)
 
     xhr.upload.addEventListener('progress', (e) => {
-      if (e.lengthComputable) item.progress = Math.round((e.loaded / e.total) * 100)
+      if (e.lengthComputable)
+        item.progress = Math.round(((chunkIndex + e.loaded / e.total) / totalChunks) * 100)
     })
-    xhr.addEventListener('load', () => {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        item.progress = 100
-        item.state = 'done'
-        try {
-          const d = JSON.parse(xhr.responseText)
-          item.savedFilename = d.filename
-          item.savedThumbSmall = d.thumbSmall
-          item.savedOriginal = d.original
-        } catch (_) {}
-        resolve(true)
-      } else if (xhr.status === 409) {
-        item.state = 'error'
-        item.error = 'File already exists'
-        resolve(false)
-      } else {
-        item.state = 'error'
-        item.error = `Server error ${xhr.status}`
-        resolve(false)
-      }
-    })
-    xhr.addEventListener('error', () => {
-      item.state = 'error'
-      item.error = 'Network error'
-      resolve(false)
-    })
+    xhr.addEventListener('load', () => resolve({ status: xhr.status, body: xhr.responseText }))
+    xhr.addEventListener('error', () => resolve({ status: 0, body: '' }))
+
     xhr.open('POST', '/api/upload')
     xhr.send(form)
   })
+}
+
+async function uploadFile(file, item) {
+  const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE))
+  const uploadId = crypto.randomUUID()
+  let lastBody = ''
+
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * CHUNK_SIZE
+    const chunk = file.slice(start, Math.min(start + CHUNK_SIZE, file.size))
+    const { status, body } = await sendChunk(chunk, uploadId, i, totalChunks, file.name, item)
+    lastBody = body
+
+    if (status === 0) { item.state = 'error'; item.error = 'Network error'; return false }
+    if (status === 409) { item.state = 'error'; item.error = 'File already exists'; return false }
+    if (status < 200 || status >= 300) { item.state = 'error'; item.error = body.trim() || `Server error ${status}`; return false }
+  }
+
+  item.progress = 100
+  item.state = 'done'
+  try {
+    const d = JSON.parse(lastBody)
+    item.savedFilename = d.filename
+    item.savedThumbSmall = d.thumbSmall
+    item.savedOriginal = d.original
+  } catch (e) { console.warn('upload: could not parse server response', e) }
+  return true
 }
 
 async function runUploads() {
@@ -132,6 +144,25 @@ async function runUploads() {
   }))
 
   for (let i = 0; i < props.files.length; i++) {
+    items.value[i].state = 'uploading'
+    await uploadFile(props.files[i], items.value[i])
+  }
+  uploading.value = false
+}
+
+async function retryFailed() {
+  const failedIndices = items.value
+    .map((item, i) => item.state === 'error' ? i : -1)
+    .filter(i => i !== -1)
+
+  for (const i of failedIndices) {
+    items.value[i].state = 'queued'
+    items.value[i].progress = 0
+    items.value[i].error = null
+  }
+
+  uploading.value = true
+  for (const i of failedIndices) {
     items.value[i].state = 'uploading'
     await uploadFile(props.files[i], items.value[i])
   }
@@ -333,4 +364,5 @@ onMounted(runUploads)
 
 .su-btn-primary   { background: #7c9cfc; color: #0a0a1a; }
 .su-btn-secondary { background: rgba(255,255,255,0.06); color: #888; }
+.su-btn-retry     { background: rgba(251,146,60,0.15); color: #fb923c; border: 1px solid rgba(251,146,60,0.3); }
 </style>

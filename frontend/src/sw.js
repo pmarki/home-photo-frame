@@ -87,6 +87,15 @@ registerRoute(
   })
 )
 
+// App config: stale-while-revalidate so offline/slow loads get cached values instantly
+registerRoute(
+  ({ url }) => url.pathname === '/api/config',
+  new StaleWhileRevalidate({
+    cacheName: 'api-config-v1',
+    plugins: [new CacheableResponsePlugin({ statuses: [0, 200] })]
+  })
+)
+
 // Originals: stale-while-revalidate (large files that rarely change)
 registerRoute(
   ({ url }) => url.pathname.startsWith('/api/original/'),

@@ -46,8 +46,15 @@ var (
 	iconsDir     string
 )
 
+var videoExts = map[string]bool{
+	".mp4":  true,
+	".webm": true,
+	".mov":  true,
+	".m4v":  true,
+}
+
 func isVideo(filename string) bool {
-	return strings.ToLower(filepath.Ext(filename)) == ".mp4"
+	return videoExts[strings.ToLower(filepath.Ext(filename))]
 }
 
 func isValidHexColor(s string) bool {
@@ -98,7 +105,7 @@ var supportedExts = map[string]bool{
 
 // isValidFilename rejects empty names, names containing path separators, and "..".
 func isValidFilename(filename string) bool {
-	return filename != "" && !strings.ContainsAny(filename, "/\\") && filename != ".."
+	return filename != "" && !strings.ContainsAny(filename, "/\\") && filename != ".." && filename != "."
 }
 
 // ── Image metadata index ──────────────────────────────────────────────────
@@ -457,6 +464,9 @@ func corsMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+		w.Header().Set("Referrer-Policy", "same-origin")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -597,12 +607,12 @@ func serveImmutable(w http.ResponseWriter, r *http.Request, cachePath string) {
 }
 
 // serveCachedThumb is the shared implementation for small and medium thumbnail
-// handlers. muPrefix distinguishes per-file mutex keys between the two sizes.
+// handlers. All sizes and crop share the same per-filename mutex so a crop
+// cannot race with a concurrent thumbnail write for the same file.
 func serveCachedThumb(
 	w http.ResponseWriter, r *http.Request,
 	prefix string,
 	cachePath func(string) string,
-	muPrefix string,
 	transform func(image.Image) image.Image,
 	quality int,
 ) {
@@ -625,7 +635,7 @@ func serveCachedThumb(
 		return
 	}
 
-	rawMu, _ := fileMu.LoadOrStore(muPrefix+filename, &sync.Mutex{})
+	rawMu, _ := fileMu.LoadOrStore(filename, &sync.Mutex{})
 	mu := rawMu.(*sync.Mutex)
 	mu.Lock()
 	defer mu.Unlock()
@@ -656,8 +666,12 @@ func serveCachedThumb(
 	}
 	data := buf.Bytes()
 	if f, err := os.Create(cp); err == nil {
-		f.Write(data) //nolint:errcheck
-		f.Close()
+		if _, werr := f.Write(data); werr != nil {
+			f.Close()
+			os.Remove(cp)
+		} else {
+			f.Close()
+		}
 	}
 	indexImage(filename, b.Dx(), b.Dy())
 	saveMetaIndex()
@@ -669,7 +683,7 @@ func serveCachedThumb(
 
 func handleThumb(w http.ResponseWriter, r *http.Request) {
 	serveCachedThumb(w, r,
-		"/api/thumb/", thumbSmallCachePath, "",
+		"/api/thumb/", thumbSmallCachePath,
 		func(img image.Image) image.Image {
 			return imaging.Fit(img, thumbnailSize, thumbnailSize, imaging.Lanczos)
 		},
@@ -679,7 +693,7 @@ func handleThumb(w http.ResponseWriter, r *http.Request) {
 
 func handleThumbMedium(w http.ResponseWriter, r *http.Request) {
 	serveCachedThumb(w, r,
-		"/api/thumb-medium/", thumbMediumCachePath, "medium:",
+		"/api/thumb-medium/", thumbMediumCachePath,
 		func(img image.Image) image.Image {
 			if img.Bounds().Dx() > mediumWidth {
 				return imaging.Resize(img, mediumWidth, 0, imaging.Lanczos)
@@ -714,34 +728,120 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	if err := r.ParseMultipartForm(100 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, 500<<20) // 500 MB hard cap
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		http.Error(w, "failed to parse form", http.StatusBadRequest)
 		return
 	}
-
+	if id := r.FormValue("uploadId"); id != "" {
+		handleChunkedUpload(w, r, id)
+		return
+	}
 	src, header, err := r.FormFile("file")
 	if err != nil {
 		http.Error(w, "missing 'file' field", http.StatusBadRequest)
 		return
 	}
 	defer src.Close()
+	saveUploadedFile(w, src, header.Filename)
+}
 
-	ext := strings.ToLower(filepath.Ext(header.Filename))
+func handleChunkedUpload(w http.ResponseWriter, r *http.Request, uploadID string) {
+	if !validUploadID(uploadID) {
+		http.Error(w, "invalid upload ID", http.StatusBadRequest)
+		return
+	}
+	chunkIndex, err1 := strconv.Atoi(r.FormValue("chunkIndex"))
+	totalChunks, err2 := strconv.Atoi(r.FormValue("totalChunks"))
+	filename := filepath.Base(r.FormValue("filename"))
+	if err1 != nil || err2 != nil || filename == "" || totalChunks < 1 || totalChunks > 10000 || chunkIndex < 0 || chunkIndex >= totalChunks {
+		http.Error(w, "invalid chunk parameters", http.StatusBadRequest)
+		return
+	}
+
+	src, _, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "missing 'file' field", http.StatusBadRequest)
+		return
+	}
+	defer src.Close()
+
+	tmpDir := filepath.Join(cacheDir, "uploads", uploadID)
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		http.Error(w, "failed to create upload dir", http.StatusInternalServerError)
+		return
+	}
+
+	chunkPath := filepath.Join(tmpDir, fmt.Sprintf("%04d", chunkIndex))
+	cf, err := os.Create(chunkPath)
+	if err != nil {
+		http.Error(w, "failed to create chunk", http.StatusInternalServerError)
+		return
+	}
+	if _, err := io.Copy(cf, src); err != nil {
+		cf.Close()
+		http.Error(w, "failed to write chunk", http.StatusInternalServerError)
+		return
+	}
+	cf.Close()
+
+	if chunkIndex < totalChunks-1 {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "chunk_ok"})
+		return
+	}
+
+	// All chunks received: assemble into a single reader and save.
+	asmPath := filepath.Join(tmpDir, "assembled")
+	asm, err := os.Create(asmPath)
+	if err != nil {
+		os.RemoveAll(tmpDir)
+		http.Error(w, "failed to assemble file", http.StatusInternalServerError)
+		return
+	}
+	for i := 0; i < totalChunks; i++ {
+		cp := filepath.Join(tmpDir, fmt.Sprintf("%04d", i))
+		chunk, err := os.Open(cp)
+		if err != nil {
+			asm.Close()
+			os.RemoveAll(tmpDir)
+			http.Error(w, fmt.Sprintf("missing chunk %d", i), http.StatusInternalServerError)
+			return
+		}
+		_, copyErr := io.Copy(asm, chunk)
+		chunk.Close()
+		if copyErr != nil {
+			asm.Close()
+			os.RemoveAll(tmpDir)
+			http.Error(w, "failed to assemble file", http.StatusInternalServerError)
+			return
+		}
+	}
+	if _, err := asm.Seek(0, io.SeekStart); err != nil {
+		asm.Close()
+		os.RemoveAll(tmpDir)
+		http.Error(w, "seek failed", http.StatusInternalServerError)
+		return
+	}
+	saveUploadedFile(w, asm, filename)
+	asm.Close()
+	os.RemoveAll(tmpDir)
+}
+
+func saveUploadedFile(w http.ResponseWriter, src io.Reader, originalName string) {
+	ext := strings.ToLower(filepath.Ext(originalName))
 	if !supportedExts[ext] {
 		http.Error(w, "unsupported file type", http.StatusUnprocessableEntity)
 		return
 	}
-
-	safeName := filepath.Base(header.Filename)
+	safeName := filepath.Base(originalName)
 	if safeName == "" || safeName == "." || safeName == ".." {
 		http.Error(w, "invalid filename", http.StatusBadRequest)
 		return
 	}
 	destPath := filepath.Join(photosDir, safeName)
 
-	// Use O_EXCL so the existence-check and create are one atomic operation,
-	// avoiding the TOCTOU race of Stat-then-Create.
+	// O_EXCL makes the existence-check and create one atomic operation.
 	dst, ferr := os.OpenFile(destPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if ferr != nil {
 		if os.IsExist(ferr) {
@@ -751,15 +851,34 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to create file", http.StatusInternalServerError)
 		return
 	}
-	defer dst.Close()
 
 	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close()
+		os.Remove(destPath)
 		http.Error(w, "failed to write file", http.StatusInternalServerError)
 		return
 	}
+	dst.Close()
 
 	log.Printf("upload: saved %s", destPath)
-	indexImage(safeName, 0, 0)
+
+	// Generate the small thumbnail synchronously so the grid can display it
+	// immediately at the correct scale (requires knowing the real dimensions).
+	var imgW, imgH int
+	if !isVideo(safeName) {
+		if srcImg, err := imaging.Open(destPath, imaging.AutoOrientation(true)); err == nil {
+			b := srcImg.Bounds()
+			imgW, imgH = b.Dx(), b.Dy()
+			thumb := imaging.Fit(srcImg, thumbnailSize, thumbnailSize, imaging.Lanczos)
+			cp := thumbSmallCachePath(safeName)
+			if f, err := os.Create(cp); err == nil {
+				jpeg.Encode(f, thumb, &jpeg.Options{Quality: 85}) //nolint:errcheck
+				f.Close()
+			}
+		}
+	}
+
+	indexImage(safeName, imgW, imgH)
 	saveMetaIndex()
 
 	small, medium, original := thumbURLs(safeName)
@@ -769,6 +888,8 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 			ModTime:     bestDate(safeName, fi.ModTime()),
 			FileMtime:   fi.ModTime(),
 			Size:        fi.Size(),
+			Width:       imgW,
+			Height:      imgH,
 			ThumbSmall:  small,
 			ThumbMedium: medium,
 			Original:    original,
@@ -782,6 +903,36 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		"thumbMedium": medium,
 		"original":    original,
 	})
+}
+
+func validUploadID(id string) bool {
+	if len(id) == 0 || len(id) > 64 {
+		return false
+	}
+	for _, c := range id {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func sweepOrphanedUploads() {
+	dir := filepath.Join(cacheDir, "uploads")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-24 * time.Hour)
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err == nil && info.ModTime().Before(cutoff) {
+			os.RemoveAll(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 func handleDelete(w http.ResponseWriter, r *http.Request) {
@@ -807,7 +958,6 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 	os.Remove(thumbSmallCachePath(filename))
 	os.Remove(thumbMediumCachePath(filename))
 	fileMu.Delete(filename)
-	fileMu.Delete("medium:" + filename)
 	metaMu.Lock()
 	delete(metaIndex, filename)
 	metaMu.Unlock()
@@ -1111,7 +1261,13 @@ func warmupThumbnails() {
 			defer func() { <-sem }()
 
 			srcPath := filepath.Join(photosDir, filename)
-			img, err := imaging.Open(srcPath, imaging.AutoOrientation(true))
+			var img image.Image
+			var err error
+			if isVideo(filename) {
+				img, err = extractVideoFrame(srcPath)
+			} else {
+				img, err = imaging.Open(srcPath, imaging.AutoOrientation(true))
+			}
 			if err != nil {
 				log.Printf("warmup: open %s: %v", filename, err)
 				indexImage(filename, 0, 0)
@@ -1253,7 +1409,6 @@ func watchPhotosDir() {
 						os.Remove(thumbSmallCachePath(filename))
 						os.Remove(thumbMediumCachePath(filename))
 						fileMu.Delete(filename)
-						fileMu.Delete("medium:" + filename)
 						metaMu.Lock()
 						delete(metaIndex, filename)
 						metaMu.Unlock()
@@ -1320,7 +1475,6 @@ func reconcile() {
 		os.Remove(thumbSmallCachePath(name))
 		os.Remove(thumbMediumCachePath(name))
 		fileMu.Delete(name)
-		fileMu.Delete("medium:" + name)
 		cacheRemove(name)
 		metaMu.Lock()
 		delete(metaIndex, name)
@@ -1350,14 +1504,22 @@ func reconcile() {
 	}
 
 	// Prune orphaned metaIndex entries (no corresponding file on disk).
-	metaMu.Lock()
+	// Collect under a read lock, then delete one at a time so readers are
+	// not blocked for the full scan.
+	metaMu.RLock()
+	var orphaned []string
 	for name := range metaIndex {
 		if _, ok := onDisk[name]; !ok {
-			delete(metaIndex, name)
-			changed = true
+			orphaned = append(orphaned, name)
 		}
 	}
-	metaMu.Unlock()
+	metaMu.RUnlock()
+	for _, name := range orphaned {
+		metaMu.Lock()
+		delete(metaIndex, name)
+		metaMu.Unlock()
+		changed = true
+	}
 
 	if changed {
 		saveMetaIndex()
@@ -1428,7 +1590,7 @@ func handleManifest(w http.ResponseWriter, r *http.Request) {
 				if files, ok := params["files"].([]any); ok && len(files) > 0 {
 					if f0, ok := files[0].(map[string]any); ok {
 						if accept, ok := f0["accept"].([]any); ok {
-							f0["accept"] = append(accept, "video/mp4")
+							f0["accept"] = append(accept, "video/mp4", "video/webm", "video/quicktime")
 						}
 					}
 				}
@@ -1502,8 +1664,15 @@ func main() {
 	}
 
 	if videoEnabled {
-		supportedExts[".mp4"] = true
-		mime.AddExtensionType(".mp4", "video/mp4")
+		for ext, mt := range map[string]string{
+			".mp4":  "video/mp4",
+			".webm": "video/webm",
+			".mov":  "video/quicktime",
+			".m4v":  "video/mp4",
+		} {
+			supportedExts[ext] = true
+			mime.AddExtensionType(ext, mt)
+		}
 		if _, err := exec.LookPath("ffmpeg"); err != nil {
 			log.Println("warning: ffmpeg not found in PATH — video thumbnails will fail")
 		}
@@ -1545,6 +1714,7 @@ func main() {
 	buildImagesCache()
 
 	safeGo("warmup", warmupThumbnails)
+	go sweepOrphanedUploads()
 	watchPhotosDir()
 	scheduleNightlyReconcile()
 
@@ -1568,7 +1738,14 @@ func main() {
 		addr = ":" + addr
 	}
 	log.Printf("listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, corsMiddleware(recoveryMiddleware(mux))))
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      corsMiddleware(recoveryMiddleware(mux)),
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+	log.Fatal(srv.ListenAndServe())
 }
 
 // frontendHandler is provided by either embed.go (production) or embed_dev.go (dev build tag).

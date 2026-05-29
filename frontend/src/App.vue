@@ -50,7 +50,7 @@
         ref="fileInput"
         type="file"
         multiple
-        :accept="videoEnabled ? 'image/*,video/mp4' : 'image/*'"
+        :accept="videoEnabled ? 'image/*,video/*' : 'image/*'"
         style="display:none"
         @change="onFilesSelected"
       />
@@ -125,11 +125,12 @@ const fileInput = ref(null)
 const sortOpen = ref(false)
 const toasts = ref([])
 let toastSeq = 0
-const videoEnabled = ref(false)
+const _storedCfg = (() => { try { return JSON.parse(localStorage.getItem('app-config') || 'null') } catch { return null } })()
+const videoEnabled = ref(_storedCfg?.videoEnabled ?? false)
 
-const isVideo = (filename) => filename?.toLowerCase().endsWith('.mp4')
+const isVideo = (filename) => /\.(mp4|webm|mov|m4v)$/i.test(filename ?? '')
 const sortRef = ref(null)
-const appTitle = ref('Photo Frame')
+const appTitle = ref(_storedCfg?.title || 'Photo Frame')
 
 function onClickOutside(e) {
   if (sortRef.value && !sortRef.value.contains(e.target)) sortOpen.value = false
@@ -225,12 +226,11 @@ onMounted(() => {
   fetch('/api/config')
     .then(r => r.ok ? r.json() : null)
     .then(cfg => {
-      if (cfg?.title) {
-        appTitle.value = cfg.title
-        document.title = cfg.title
-      }
-      if (cfg?.videoEnabled) videoEnabled.value = true
-      if (cfg?.bgColor) document.documentElement.style.setProperty('--bg-color', cfg.bgColor)
+      if (!cfg) return
+      try { localStorage.setItem('app-config', JSON.stringify(cfg)) } catch {}
+      if (cfg.title) { appTitle.value = cfg.title; document.title = cfg.title }
+      if (cfg.videoEnabled) videoEnabled.value = true
+      if (cfg.bgColor) document.documentElement.style.setProperty('--bg-color', cfg.bgColor)
     })
     .catch(() => {})
 

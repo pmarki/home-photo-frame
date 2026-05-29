@@ -155,7 +155,7 @@ const deleting     = ref(false)
 const cropping     = ref(false)
 const actionError  = ref('')
 
-const isVideo = (filename) => filename?.toLowerCase().endsWith('.mp4')
+const isVideo = (filename) => /\.(mp4|webm|mov|m4v)$/i.test(filename ?? '')
 
 const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function'
 
@@ -183,7 +183,10 @@ async function shareOrDownload() {
       a.click()
     }
   } catch (e) {
-    if (e.name !== 'AbortError') console.warn('share/download failed:', e)
+    if (e.name !== 'AbortError') {
+      actionError.value = e.message || 'Share failed'
+      setTimeout(() => { actionError.value = '' }, 3000)
+    }
   } finally {
     sharing.value = false
   }
@@ -204,7 +207,7 @@ async function applyCrop(rect) {
     emit('cropped', filename, newImage)
   } catch (e) {
     console.error('crop failed:', e)
-    actionError.value = 'Crop failed'
+    actionError.value = e.message || 'Crop failed'
     setTimeout(() => { actionError.value = '' }, 3000)
   } finally {
     cropping.value = false
@@ -230,7 +233,7 @@ async function onDeleteClick() {
     emit('deleted', filename)
   } catch (e) {
     console.error('delete failed:', e)
-    actionError.value = 'Delete failed'
+    actionError.value = e.message || 'Delete failed'
     setTimeout(() => { actionError.value = '' }, 3000)
   } finally {
     deleting.value = false
