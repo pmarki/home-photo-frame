@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <!-- frame background -->
+  <rect width="24" height="24" rx="3" fill="#0d0d1a"/>
+  <!-- frame border -->
+  <rect x="1.5" y="1.5" width="21" height="21" rx="2" fill="none" stroke="#5566cc" stroke-width="2"/>
+  <!-- image area (sky) -->
+  <rect x="4" y="4" width="16" height="16" rx="1" fill="#1a2a50"/>
+  <!-- sun -->
+  <circle cx="16" cy="8" r="2.5" fill="#f0c030"/>
+  <!-- mountain -->
+  <polygon points="4,20 11,10 18,20" fill="#2a4a70"/>
+  <!-- ground strip -->
+  <rect x="4" y="19" width="16" height="1" fill="#3a3a60"/>
+</svg>

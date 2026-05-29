@@ -2,7 +2,8 @@
   <div class="app">
     <header class="app-header">
       <h1 class="app-title">
-        <svg class="title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <img v-if="titleIcon" :src="'/icons/favicon.svg'" class="title-icon" alt="" />
+        <svg v-else class="title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <!-- frame border -->
           <rect x="2" y="2" width="20" height="20" rx="1.5"/>
           <!-- mat inset -->
@@ -127,6 +128,7 @@ const toasts = ref([])
 let toastSeq = 0
 const _storedCfg = (() => { try { return JSON.parse(localStorage.getItem('app-config') || 'null') } catch { return null } })()
 const videoEnabled = ref(_storedCfg?.videoEnabled ?? false)
+const titleIcon = ref(_storedCfg?.titleIcon ?? false)
 
 const isVideo = (filename) => /\.(mp4|webm|mov|m4v)$/i.test(filename ?? '')
 const sortRef = ref(null)
@@ -231,6 +233,7 @@ onMounted(() => {
       if (cfg.title) { appTitle.value = cfg.title; document.title = cfg.title }
       if (cfg.videoEnabled) videoEnabled.value = true
       if (cfg.bgColor) document.documentElement.style.setProperty('--bg-color', cfg.bgColor)
+      titleIcon.value = cfg.titleIcon ?? false
     })
     .catch(() => {})
 

@@ -1562,10 +1562,12 @@ func envOr(key, fallback string) string {
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	titleIcon := iconsDir != ""
 	json.NewEncoder(w).Encode(map[string]any{
 		"title":        appTitle,
 		"videoEnabled": videoEnabled,
 		"bgColor":      bgColor,
+		"titleIcon":    titleIcon,
 	})
 }
 

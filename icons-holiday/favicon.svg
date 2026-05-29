@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <!-- sky -->
+  <rect width="24" height="24" fill="#6ab7ea"/>
+
+  <!-- sun body -->
+  <circle cx="19.2" cy="4.8" r="2.8" fill="#fdd835"/>
+  <!-- rectangular rays (4 cardinal) -->
+  <rect x="18.5" y="0.1" width="1.4" height="2"   rx="0.3" fill="#fdd835"/>
+  <rect x="18.5" y="7.5" width="1.4" height="2"   rx="0.3" fill="#fdd835"/>
+  <rect x="22.9" y="4.1" width="2"   height="1.4" rx="0.3" fill="#fdd835"/>
+  <rect x="15.0" y="4.1" width="2"   height="1.4" rx="0.3" fill="#fdd835"/>
+
+  <!-- sea -->
+  <rect x="0" y="16.5" width="24" height="4" fill="#0d47a1"/>
+  <!-- wave highlight -->
+  <path d="M0,18 Q6,16.5 12,18 Q18,19.5 24,18"
+        fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="0.7"/>
+
+  <!-- sand -->
+  <rect x="0" y="20" width="24" height="4" fill="#e8c840"/>
+
+  <!-- palm trunk (curves from sand up-left to crown) -->
+  <path d="M5.5,24 Q7,19.5 8.5,14 Q9.5,10 10,6"
+        stroke="#795548" stroke-width="2.4" fill="none" stroke-linecap="round"/>
+
+  <!-- palm fronds (filled leaf shapes radiating from crown at 10,6) -->
+  <!-- upper-left -->
+  <path d="M10,6 C7.5,3 3.5,2 2,4 C5,4 7.5,5 10,6Z" fill="#388e3c"/>
+  <!-- upper -->
+  <path d="M10,6 C9,2.5 8,0.5 6,0 C7.5,2 9,4 10,6Z" fill="#43a047"/>
+  <!-- upper-right -->
+  <path d="M10,6 C12,2.5 15,2 17,3.5 C14.5,4 12.5,5 10,6Z" fill="#388e3c"/>
+  <!-- right-down -->
+  <path d="M10,6 C13,5.5 16,7 15.5,9 C13.5,8 12,7 10,6Z" fill="#2e7d32"/>
+  <!-- left-down -->
+  <path d="M10,6 C8,7 5.5,8.5 4.5,7 C6.5,7 8,6.5 10,6Z" fill="#2e7d32"/>
+</svg>
