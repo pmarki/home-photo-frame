@@ -27,6 +27,7 @@ Drop images into a folder, get a fast infinite-scroll gallery with full-screen l
 - **In-app crop** — drag-to-select crop UI; saves a new file, deletes the original
 - **Delete** — two-tap confirmation in the lightbox
 - **Upload** — drag-and-drop or file picker with per-file progress bar; chunked (1.5 MB/chunk) so uploads survive slow connections and proxy read-timeouts; 500 MB per-file cap enforced server-side; retry button for failed files; optional post-upload crop queue
+- **Year scrollbar** — Google Photos-style overlay on the right edge: year markers fade in while scrolling (highlighted for the current year), with a touch-draggable 3-D handle for jumping directly to any year; hidden on mouse/desktop (labels only), touch-only on mobile
 - **Sort** — by filename or photo date (EXIF → filename pattern → mtime), ascending or descending; persisted to localStorage
 - **Share original** — Web Share API (file blob) on mobile; download fallback on desktop
 - **Android share target** — share photos *into* the app from any Android app; the service worker intercepts the POST, stores files in the Cache API, the app shows per-file upload progress
@@ -326,14 +327,18 @@ Install the PWA from Chrome on Android ("Add to Home Screen"). After installatio
 │       ├── sw.js             service worker (Workbox injectManifest + share target)
 │       ├── App.vue           root component, routing between gallery / upload / crop
 │       ├── composables/
-│       │   └── useGallery.js pagination, sort state, local image mutations
+│       │   ├── useGallery.js         pagination, sort state, local image mutations
+│       │   ├── useVirtualScroll.js   windowed rendering — visible rows, spacers, scroll metrics
+│       │   └── useYearScrollbar.js   year-label positions, active year, touch-handle state
 │       └── components/
-│           ├── GalleryGrid.vue       infinite-scroll grid with IntersectionObserver
-│           ├── LightboxModal.vue     full-screen viewer, share/download, delete, crop
-│           ├── ImageCropper.vue      drag-to-select crop editor
-│           ├── UploadDialog.vue      per-file upload progress (picker / drag-drop)
-│           ├── ShareUploader.vue     per-file upload progress (Android share target)
-│           └── PostUploadCropQueue.vue  post-upload crop queue
+│           ├── GalleryGrid.vue           infinite-scroll virtual grid
+│           ├── YearScrollbar.vue         right-edge year overlay with touch-draggable handle
+│           ├── LightboxModal.vue         full-screen viewer, share/download, delete, crop
+│           ├── ImageCropper.vue          drag-to-select crop editor
+│           ├── UploadDialog.vue          per-file upload progress (picker / drag-drop)
+│           ├── ShareUploader.vue         per-file upload progress (Android share target)
+│           ├── GalleryPlaceholder.vue    skeleton tile for not-yet-loaded images
+│           └── PostUploadCropQueue.vue   post-upload crop queue
 ├── photos/                   source images (not committed)
 └── cache/                    thumbnail cache (s/{filename}, m/{filename}) + meta.json (not committed)
 ```

@@ -40,7 +40,7 @@
         <div v-if="allDone" class="su-footer-actions">
           <button v-if="errorCount > 0" class="su-btn su-btn-retry" @click="retryFailed">Retry failed</button>
           <button class="su-btn su-btn-secondary" @click="finish(false)">Done</button>
-          <button v-if="items.some(i => i.state === 'done')" class="su-btn su-btn-primary" @click="finish(true)">Crop</button>
+          <button v-if="items.some(i => i.state === 'done' && !isVideo(i.name))" class="su-btn su-btn-primary" @click="finish(true)">Crop</button>
         </div>
         <button v-else-if="!uploading" class="su-btn su-btn-secondary" @click="finish(false)">
           Cancel
@@ -61,6 +61,7 @@ const items = ref([])     // { name, size, state: 'queued'|'uploading'|'done'|'e
 const uploading = ref(false)
 const filesRef = ref([])  // kept so retryFailed can re-upload without re-reading the cache
 
+const isVideo    = (filename) => /\.(mp4|webm|mov|m4v)$/i.test(filename ?? '')
 const allDone    = computed(() => items.value.length > 0 && items.value.every((i) => i.state === 'done' || i.state === 'error'))
 const errorCount = computed(() => items.value.filter(i => i.state === 'error').length)
 

@@ -43,7 +43,7 @@
         <div v-if="allDone" class="su-footer-actions">
           <button v-if="errorCount > 0" class="su-btn su-btn-retry" @click="retryFailed">Retry failed</button>
           <button class="su-btn su-btn-secondary" @click="finish(false)">Done</button>
-          <button v-if="doneCount > 0" class="su-btn su-btn-primary" @click="finish(true)">Crop</button>
+          <button v-if="croppableCount > 0" class="su-btn su-btn-primary" @click="finish(true)">Crop</button>
         </div>
         <button v-else-if="!uploading" class="su-btn su-btn-secondary" @click="finish(false)">
           Cancel
@@ -65,9 +65,12 @@ const emit = defineEmits(['done'])
 const items = ref([])
 const uploading = ref(false)
 
-const doneCount  = computed(() => items.value.filter(i => i.state === 'done').length)
-const errorCount = computed(() => items.value.filter(i => i.state === 'error').length)
-const allDone    = computed(() => items.value.length > 0 && items.value.every(i => i.state === 'done' || i.state === 'error'))
+const isVideo = (filename) => /\.(mp4|webm|mov|m4v)$/i.test(filename ?? '')
+
+const doneCount      = computed(() => items.value.filter(i => i.state === 'done').length)
+const errorCount     = computed(() => items.value.filter(i => i.state === 'error').length)
+const croppableCount = computed(() => items.value.filter(i => i.state === 'done' && !isVideo(i.name)).length)
+const allDone        = computed(() => items.value.length > 0 && items.value.every(i => i.state === 'done' || i.state === 'error'))
 
 const statusLine = computed(() => {
   if (items.value.length === 0) return 'Preparing…'
@@ -171,7 +174,7 @@ async function retryFailed() {
 
 function finish(withCrop) {
   const uploaded = withCrop
-    ? items.value.filter(i => i.state === 'done' && i.savedFilename)
+    ? items.value.filter(i => i.state === 'done' && i.savedFilename && !isVideo(i.name))
         .map(i => ({ filename: i.savedFilename, thumbSmall: i.savedThumbSmall, original: i.savedOriginal }))
     : []
   emit('done', uploaded)

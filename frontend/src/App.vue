@@ -60,9 +60,8 @@
     <main>
       <GalleryGrid
         :images="images"
+        :total="total"
         :loading="loading"
-        :has-more="hasMore"
-        @load-more="loadNextPage"
         @open="openModal"
       />
 
@@ -74,6 +73,7 @@
 
     <Teleport to="body">
       <LightboxModal
+        ref="lightboxRef"
         v-if="modalOpen"
         :images="images"
         :initial-index="modalIndex"
@@ -105,7 +105,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import GalleryGrid from './components/GalleryGrid.vue'
 import LightboxModal from './components/LightboxModal.vue'
 import ShareUploader from './components/ShareUploader.vue'
@@ -113,15 +113,15 @@ import UploadDialog from './components/UploadDialog.vue'
 import PostUploadCropQueue from './components/PostUploadCropQueue.vue'
 import { useGallery } from './composables/useGallery.js'
 
-const { images, total, loading, error, hasMore, sortBy, sortOrder, loadNextPage, setSort, removeImage, replaceImage, forceReload } =
-  useGallery()
+const { images, total, loading, error, hasMore, sortBy, sortOrder, loadNextPage, setSort, removeImage, replaceImage, forceReload } = useGallery()
 
 const modalOpen = ref(false)
 const modalIndex = ref(0)
-const modalHadCrop = ref(false)
 const shareUploaderVisible = ref(false)
 const uploadFiles = ref(null)
 const cropQueue = ref(null)  // [{filename}] — shown after upload when non-null
+let savedScrollY = 0         // gallery scroll position saved when lightbox opens
+const lightboxRef = ref(null)
 const fileInput = ref(null)
 const sortOpen = ref(false)
 const toasts = ref([])
@@ -148,15 +148,42 @@ const sortOptions = [
 ]
 
 function openModal(index) {
+  savedScrollY = window.scrollY
   modalIndex.value = index
-  modalHadCrop.value = false
   modalOpen.value = true
+  history.pushState({ modal: 'lightbox', index }, '')
 }
 
-function closeModal() {
+async function closeModal() {
   modalOpen.value = false
-  if (modalHadCrop.value) {
-    modalHadCrop.value = false
+  if (history.state?.modal === 'lightbox') history.back()
+  await nextTick()
+  window.scrollTo(0, savedScrollY)
+}
+
+function onPopState(e) {
+  const modal = e.state?.modal ?? null
+  if (modal !== null) return
+
+  if (modalOpen.value) {
+    const cropResult = lightboxRef.value?.tryExitCrop()
+    if (cropResult) {
+      history.pushState({ modal: 'lightbox' }, '')
+      return
+    }
+    modalOpen.value = false
+    nextTick().then(() => window.scrollTo(0, savedScrollY))
+  } else if (cropQueue.value !== null) {
+    cropQueue.value = null
+    forceReload()
+  } else if (uploadFiles.value !== null) {
+    uploadFiles.value = null
+    forceReload()
+  } else if (shareUploaderVisible.value) {
+    shareUploaderVisible.value = false
+    const url = new URL(window.location.href)
+    url.searchParams.delete('share-pending')
+    history.replaceState({ modal: null }, '', url)
     forceReload()
   }
 }
@@ -183,37 +210,45 @@ function onFilesSelected(e) {
     showToast(label)
   }
 
-  if (unique.length > 0) uploadFiles.value = unique
+  if (unique.length > 0) {
+    uploadFiles.value = unique
+    history.pushState({ modal: 'upload' }, '')
+  }
 }
 
 function onUploadDone(uploadedImages) {
+  const croppable = (uploadedImages ?? []).filter(i => !isVideo(i.filename))
   uploadFiles.value = null
-  const croppable = uploadedImages?.filter(i => !isVideo(i.filename)) ?? []
   if (croppable.length > 0) {
+    history.replaceState({ modal: 'cropqueue' }, '')
     cropQueue.value = croppable
   } else {
+    if (history.state?.modal === 'upload') history.back()
     forceReload()
   }
 }
 
 function onDeleted(filename) {
   removeImage(filename)
-  if (images.value.length === 0) modalOpen.value = false
+  if (images.value.length === 0) {
+    modalOpen.value = false
+    if (history.state?.modal === 'lightbox') history.back()
+  }
 }
 
 function onCropped(oldFilename, newImage) {
-  replaceImage(oldFilename, newImage)  // immediate update in the still-open lightbox
-  modalHadCrop.value = true
+  replaceImage(oldFilename, newImage)
 }
 
 function onShareDone(uploadedImages) {
   shareUploaderVisible.value = false
   const url = new URL(window.location.href)
   url.searchParams.delete('share-pending')
-  history.replaceState({}, '', url)
-  const croppable = uploadedImages?.filter(i => !isVideo(i.filename)) ?? []
+  history.replaceState({ modal: null }, '', url)
+  const croppable = (uploadedImages ?? []).filter(i => !isVideo(i.filename))
   if (croppable.length > 0) {
     cropQueue.value = croppable
+    history.pushState({ modal: 'cropqueue' }, '')
   } else {
     forceReload()
   }
@@ -221,10 +256,14 @@ function onShareDone(uploadedImages) {
 
 function onCropQueueDone() {
   cropQueue.value = null
+  if (history.state?.modal === 'cropqueue') history.back()
   forceReload()
 }
 
 onMounted(() => {
+  history.scrollRestoration = 'manual'
+  history.replaceState({ modal: null }, '')
+
   fetch('/api/config')
     .then(r => r.ok ? r.json() : null)
     .then(cfg => {
@@ -241,12 +280,15 @@ onMounted(() => {
   const url = new URL(window.location.href)
   if (url.searchParams.has('share-pending')) {
     shareUploaderVisible.value = true
+    history.pushState({ modal: 'share-uploader' }, '')
   }
+  window.addEventListener('popstate', onPopState)
   loadNextPage()
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', onClickOutside, true)
+  window.removeEventListener('popstate', onPopState)
 })
 </script>
 

@@ -4,10 +4,10 @@
     :src="currentImage.original"
     :filename="currentImage.filename"
     @crop="applyCrop"
-    @cancel="cropping = false"
+    @cancel="cancelCrop"
   />
 
-  <div class="lb-overlay" @click.self="$emit('close')" role="dialog" aria-modal="true" :aria-label="currentImage.filename">
+  <div class="lb-overlay" @click.self="onOverlayClick" role="dialog" aria-modal="true" :aria-label="currentImage.filename">
 
     <!-- Action error banner -->
     <div v-if="actionError" class="lb-action-error" role="alert">{{ actionError }}</div>
@@ -49,18 +49,19 @@
             <line x1="12" y1="15" x2="12" y2="3"/>
           </svg>
         </button>
-        <!-- Crop (images only; always rendered so header width stays constant) -->
+        <!-- Crop (hidden for videos but kept in DOM so header width stays constant) -->
         <button
+          v-show="!isVideo(currentImage.filename)"
           class="lb-icon-btn"
           title="Crop image"
-          @click="!isVideo(currentImage.filename) && (cropping = true)"
+          @click="openCrop"
         >
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="6 2 6 18 22 18"/>
             <polyline points="2 6 18 6 18 22"/>
           </svg>
         </button>
-        <button class="lb-icon-btn" title="Close (Esc)" @click="$emit('close')">
+        <button class="lb-icon-btn" title="Close (Esc)" @click="onCloseClick">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="18" y1="6" x2="6" y2="18"/>
             <line x1="6" y1="6" x2="18" y2="18"/>
@@ -158,6 +159,22 @@ const actionError  = ref('')
 const isVideo = (filename) => /\.(mp4|webm|mov|m4v)$/i.test(filename ?? '')
 
 const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function'
+
+function openCrop() {
+  cropping.value = true
+}
+
+function cancelCrop() {
+  cropping.value = false
+}
+
+function onCloseClick() {
+  emit('close')
+}
+
+function onOverlayClick() {
+  emit('close')
+}
 
 // Single action: share via Web Share API when possible, download otherwise
 async function shareOrDownload() {
@@ -259,9 +276,12 @@ function navigate(dir) {
 
 // ── Keyboard navigation ───────────────────────────────────────────────
 function onKeydown(e) {
-  if (e.key === 'ArrowLeft')  navigate(-1)
+  if (e.key === 'ArrowLeft')       navigate(-1)
   else if (e.key === 'ArrowRight') navigate(1)
-  else if (e.key === 'Escape')     emit('close')
+  else if (e.key === 'Escape') {
+    if (cropping.value) cancelCrop()
+    else emit('close')
+  }
 }
 
 // ── Touch/swipe navigation ────────────────────────────────────────────
@@ -298,6 +318,14 @@ function formatDate(iso) {
 watch(() => currentImage.value.filename, () => {
   imgLoaded.value = false
   imgError.value  = false
+})
+
+defineExpose({
+  tryExitCrop() {
+    if (!cropping.value) return false
+    cropping.value = false
+    return true
+  }
 })
 
 onMounted(() => {

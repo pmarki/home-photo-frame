@@ -1,8 +1,14 @@
 import { precacheAndRoute } from 'workbox-precaching'
+import { clientsClaim } from 'workbox-core'
 import { registerRoute, NavigationRoute } from 'workbox-routing'
 import { CacheFirst, NetworkFirst, StaleWhileRevalidate } from 'workbox-strategies'
 import { ExpirationPlugin } from 'workbox-expiration'
 import { CacheableResponsePlugin } from 'workbox-cacheable-response'
+
+// With registerType:'autoUpdate' vite-plugin-pwa injects skipWaiting() for us;
+// clientsClaim() makes the newly-activated SW take over open tabs immediately
+// so users don't need a manual reload to get the new SW logic.
+clientsClaim()
 
 // Injected by vite-plugin-pwa at build time
 precacheAndRoute(self.__WB_MANIFEST)
@@ -27,13 +33,19 @@ async function handleShareTarget(request) {
     if (incoming.length > 0) {
       const cache = await caches.open(SHARE_CACHE)
 
+      // Purge any stale entries left over from a previous share that was
+      // interrupted before the page could clean them up (prevents quota buildup)
+      const stale = await cache.keys()
+      await Promise.all(stale.map((k) => cache.delete(k)))
+
       const fileInfos = []
       for (const file of incoming) {
         const key = `/share-pending/${self.crypto.randomUUID()}`
-        // Store the raw bytes so the page can reconstruct a File object
+        // Pass File directly as the response body — avoids loading the entire
+        // file into SW memory via arrayBuffer(), which OOMs on large videos
         await cache.put(
           key,
-          new Response(await file.arrayBuffer(), {
+          new Response(file, {
             headers: {
               'Content-Type': file.type || 'application/octet-stream',
               'X-Filename': encodeURIComponent(file.name),

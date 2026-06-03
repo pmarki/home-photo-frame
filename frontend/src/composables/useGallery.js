@@ -10,8 +10,8 @@ export function useGallery() {
   const error = ref(null)
   const sortBy = ref(localStorage.getItem('sortBy') || 'taken')
   const sortOrder = ref(localStorage.getItem('sortOrder') || 'desc')
+  let generation = 0 // incremented on every reset to cancel stale background loops
 
-  // hasMore is true before the first load (page 0) or when there are more pages.
   const hasMore = computed(
     () => currentPage.value === 0 || images.value.length < total.value
   )
@@ -22,6 +22,8 @@ export function useGallery() {
 
     loading.value = true
     error.value = null
+    const isFirstPage = currentPage.value === 0
+    const gen = generation
     try {
       const nextPage = currentPage.value + 1
       const params = new URLSearchParams({
@@ -33,13 +35,30 @@ export function useGallery() {
       const res = await fetch(`/api/images?${params}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
+      // Discard if a reset happened while we were fetching
+      if (gen !== generation) return
       images.value = [...images.value, ...(data.images ?? [])]
       total.value = data.total ?? 0
       currentPage.value = nextPage
     } catch (e) {
-      error.value = e.message
+      if (gen === generation) error.value = e.message
+      return
     } finally {
       loading.value = false
+    }
+
+    if (isFirstPage && hasMore.value) loadRemainingPages(gen)
+  }
+
+  async function loadRemainingPages(gen) {
+    while (gen === generation && hasMore.value) {
+      if (loading.value) {
+        await new Promise(r => setTimeout(r, 50))
+        continue
+      }
+      const pageBefore = currentPage.value
+      await loadNextPage()
+      if (gen === generation && currentPage.value === pageBefore) break // fetch failed, stop
     }
   }
 
@@ -51,16 +70,20 @@ export function useGallery() {
     }
   }
 
+  function resetState() {
+    generation++
+    images.value = []
+    total.value = 0
+    currentPage.value = 0
+  }
+
   async function setSort(by, order) {
     if (sortBy.value === by && sortOrder.value === order) return
     sortBy.value = by
     sortOrder.value = order
     localStorage.setItem('sortBy', by)
     localStorage.setItem('sortOrder', order)
-    // Reset and reload from scratch
-    images.value = []
-    total.value = 0
-    currentPage.value = 0
+    resetState()
     await loadNextPage()
   }
 
@@ -70,9 +93,7 @@ export function useGallery() {
   }
 
   async function forceReload() {
-    images.value = []
-    total.value = 0
-    currentPage.value = 0
+    resetState()
     await loadNextPage()
   }
 
