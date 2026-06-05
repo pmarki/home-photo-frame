@@ -23,8 +23,6 @@ import (
 
 func handleImages(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	sortBy := q.Get("sort")
-	order := q.Get("order")
 	page, _ := strconv.Atoi(q.Get("page"))
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	paginate := q.Has("limit")
@@ -35,63 +33,26 @@ func handleImages(w http.ResponseWriter, r *http.Request) {
 		limit = 50
 	}
 
-	key := sortBy + ":" + order
-
-	// buildPage extracts a page of ImageInfo from a sorted index slice.
-	// Must be called with imagesCacheMu held.
-	buildPage := func(indices []int) ([]ImageInfo, int) {
-		total := len(indices)
-		if !paginate {
-			out := make([]ImageInfo, total)
-			for i, idx := range indices {
-				out[i] = imagesCache[idx]
-			}
-			return out, total
-		}
-		start := (page - 1) * limit
-		end := start + limit
-		if start > total {
-			start = total
-		}
-		if end > total {
-			end = total
-		}
-		out := make([]ImageInfo, end-start)
-		for i, idx := range indices[start:end] {
-			out[i] = imagesCache[idx]
-		}
-		return out, total
+	params := queryParams{
+		folder:   q.Get("folder"),
+		ftype:    q.Get("type"),
+		search:   q.Get("search"),
+		sort:     q.Get("sort"),
+		order:    q.Get("order"),
+		page:     page,
+		limit:    limit,
+		paginate: paginate,
 	}
 
-	var slice []ImageInfo
-	var total int
-
-	// Fast path: sorted index is already cached.
-	imagesCacheMu.RLock()
-	indices, hit := sortedCache[key]
-	if hit {
-		slice, total = buildPage(indices)
+	images, total, err := queryFiles(params)
+	if err != nil {
+		log.Printf("handleImages: query error: %v", err)
+		http.Error(w, "query failed", http.StatusInternalServerError)
+		return
 	}
-	imagesCacheMu.RUnlock()
-
-	if !hit {
-		// Slow path: build and cache the sorted index.
-		imagesCacheMu.Lock()
-		if indices, hit = sortedCache[key]; !hit {
-			indices = make([]int, len(imagesCache))
-			for i := range indices {
-				indices[i] = i
-			}
-			sortIndices(indices, imagesCache, sortBy, order)
-			if sortedCache == nil {
-				sortedCache = make(map[string][]int)
-			}
-			sortedCache[key] = indices
-		}
-		slice, total = buildPage(indices)
-		imagesCacheMu.Unlock()
+	if images == nil {
+		images = []ImageInfo{}
 	}
-
 	if !paginate {
 		page = 1
 		limit = total
@@ -100,7 +61,7 @@ func handleImages(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(ListResponse{ //nolint:errcheck
-		Images: slice,
+		Images: images,
 		Total:  total,
 		Page:   page,
 		Limit:  limit,
@@ -131,7 +92,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 500<<20) // 500 MB hard cap
+	r.Body = http.MaxBytesReader(w, r.Body, 500<<20)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		http.Error(w, "failed to parse form", http.StatusBadRequest)
 		return
@@ -194,7 +155,6 @@ func handleChunkedUpload(w http.ResponseWriter, r *http.Request, uploadID string
 		return
 	}
 
-	// All chunks received: assemble into a single reader and save.
 	asmPath := filepath.Join(tmpDir, "assembled")
 	asm, err := os.Create(asmPath)
 	if err != nil {
@@ -244,7 +204,6 @@ func saveUploadedFile(w http.ResponseWriter, src io.Reader, originalName string)
 	}
 	destPath := filepath.Join(photosDir, safeName)
 
-	// O_EXCL makes the existence-check and create one atomic operation.
 	dst, ferr := os.OpenFile(destPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if ferr != nil {
 		if os.IsExist(ferr) {
@@ -265,8 +224,6 @@ func saveUploadedFile(w http.ResponseWriter, src io.Reader, originalName string)
 
 	log.Printf("upload: saved %s", destPath)
 
-	// Generate the small thumbnail synchronously so the grid can display it
-	// immediately at the correct scale (requires knowing the real dimensions).
 	var imgW, imgH int
 	if !isVideo(safeName) {
 		if srcImg, err := imaging.Open(destPath, imaging.AutoOrientation(true)); err == nil {
@@ -281,24 +238,14 @@ func saveUploadedFile(w http.ResponseWriter, src io.Reader, originalName string)
 		}
 	}
 
-	indexImage(safeName, imgW, imgH)
-	saveMetaIndex()
+	indexFileRecord(safeName, imgW, imgH)
 
-	small, medium, original := thumbURLs(safeName)
-	if fi, err := os.Stat(destPath); err == nil {
-		cacheAdd(ImageInfo{
-			Filename:    safeName,
-			Path:        safeName, // uploads go to root; path == filename
-			ModTime:     bestDate(safeName, fi.ModTime()),
-			FileMtime:   fi.ModTime(),
-			Size:        fi.Size(),
-			Width:       imgW,
-			Height:      imgH,
-			ThumbSmall:  small,
-			ThumbMedium: medium,
-			Original:    original,
-		})
+	fi, err := os.Stat(destPath)
+	if err != nil {
+		http.Error(w, "failed to stat uploaded file", http.StatusInternalServerError)
+		return
 	}
+	small, medium, original := thumbURLs(safeName, fi.ModTime())
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
@@ -363,11 +310,7 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 	os.Remove(thumbSmallCachePath(imgPath))
 	os.Remove(thumbMediumCachePath(imgPath))
 	fileMu.Delete(imgPath)
-	metaMu.Lock()
-	delete(metaIndex, imgPath)
-	metaMu.Unlock()
-	cacheRemove(imgPath)
-	saveMetaIndex()
+	deleteFile(imgPath)
 	log.Printf("delete: %s", srcPath)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -400,13 +343,11 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 
 	srcPath := filepath.Join(photosDir, filepath.FromSlash(imgPath))
 
-	// Serialize all operations on this file through its per-file mutex.
 	rawMu, _ := fileMu.LoadOrStore(imgPath, &sync.Mutex{})
 	mu := rawMu.(*sync.Mutex)
 	mu.Lock()
 	defer mu.Unlock()
 
-	// Read raw bytes first so we can copy EXIF into the re-encoded file.
 	originalData, err := os.ReadFile(srcPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -424,12 +365,8 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 	}
 
 	bounds := img.Bounds()
-	x0 := body.X
-	y0 := body.Y
-	x1 := body.X + body.Width
-	y1 := body.Y + body.Height
-
-	// Clamp to actual image dimensions.
+	x0, y0 := body.X, body.Y
+	x1, y1 := body.X+body.Width, body.Y+body.Height
 	if x0 < 0 {
 		x0 = 0
 	}
@@ -450,10 +387,6 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 	cropped := imaging.Crop(img, image.Rect(x0, y0, x1, y1))
 	b := cropped.Bounds()
 
-	// Encode to a buffer, then atomically replace the source file.
-	// Using srcPath+".tmp" keeps the temp file on the same filesystem so
-	// os.Rename is atomic; the ".tmp" extension is not in supportedExts so
-	// the file watcher ignores it.
 	format, err := imaging.FormatFromFilename(srcPath)
 	if err != nil {
 		format = imaging.JPEG
@@ -480,33 +413,16 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Evict stale thumbnail caches and update metadata with new dimensions.
 	os.Remove(thumbSmallCachePath(imgPath))
 	os.Remove(thumbMediumCachePath(imgPath))
-	indexImage(imgPath, b.Dx(), b.Dy())
-	saveMetaIndex()
+	indexFileRecord(imgPath, b.Dx(), b.Dy())
 
 	fi, statErr := os.Stat(srcPath)
-	small, medium, original := thumbURLs(imgPath)
-
-	imagesCacheMu.Lock()
-	for i, entry := range imagesCache {
-		if entry.Path == imgPath {
-			if statErr == nil {
-				imagesCache[i].Size = fi.Size()
-				imagesCache[i].FileMtime = fi.ModTime()
-				imagesCache[i].ModTime = bestDate(imgPath, fi.ModTime())
-			}
-			imagesCache[i].Width = b.Dx()
-			imagesCache[i].Height = b.Dy()
-			imagesCache[i].ThumbSmall = small
-			imagesCache[i].ThumbMedium = medium
-			imagesCache[i].Original = original
-			sortedCache = nil
-			break
-		}
+	if statErr != nil {
+		http.Error(w, "failed to stat cropped file", http.StatusInternalServerError)
+		return
 	}
-	imagesCacheMu.Unlock()
+	small, medium, original := thumbURLs(imgPath, fi.ModTime())
 
 	log.Printf("crop: %s (%dx%d)", imgPath, b.Dx(), b.Dy())
 
@@ -522,7 +438,6 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleConfig returns runtime configuration consumed by the Vue frontend.
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -535,8 +450,6 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleManifest serves the PWA manifest with name/short_name replaced by the
-// configured title so two parallel instances appear as distinct installed apps.
 func handleManifest(w http.ResponseWriter, r *http.Request) {
 	if rawManifest == nil {
 		http.Error(w, "manifest not available", http.StatusInternalServerError)
@@ -573,8 +486,6 @@ func handleManifest(w http.ResponseWriter, r *http.Request) {
 	w.Write(data) //nolint:errcheck
 }
 
-// handleIcons serves icon files from iconsDir when set, falling back to the
-// embedded frontend assets. Allows custom icons without rebuilding the binary.
 func handleIcons(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/icons/")
 	if !isValidFilename(name) {
@@ -608,28 +519,19 @@ func handleIcons(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-// spaHandler wraps a filesystem handler so that any path not found in the FS
-// is served as index.html — required for client-side routing.
 func spaHandler(fsys fs.FS) http.Handler {
 	fileServer := http.FileServer(http.FS(fsys))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := strings.TrimPrefix(r.URL.Path, "/")
-
-		// index.html and sw.js keep the same filename across builds, so the
-		// browser must revalidate them on every load rather than serving stale
-		// cached copies that reference old hashed assets.
 		if p == "" || p == "index.html" || p == "sw.js" {
 			w.Header().Set("Cache-Control", "no-cache")
 		}
-
-		// Try to open the requested path in the FS
 		f, err := fsys.Open(p)
 		if err == nil {
 			f.Close()
 			fileServer.ServeHTTP(w, r)
 			return
 		}
-		// Fall back to index.html for client-side routing
 		w.Header().Set("Cache-Control", "no-cache")
 		r2 := *r
 		r2.URL.Path = "/"

@@ -18,8 +18,9 @@ import (
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
-// setupTestEnv saves all mutable globals, wires up isolated temp dirs, and
-// registers t.Cleanup to restore original state. Call at the top of every test.
+// setupTestEnv saves all mutable globals, wires up isolated temp dirs and an
+// in-memory SQLite database, and registers t.Cleanup to restore original state.
+// Call at the top of every test.
 func setupTestEnv(t *testing.T) {
 	t.Helper()
 	tmp := t.TempDir()
@@ -31,19 +32,10 @@ func setupTestEnv(t *testing.T) {
 		}
 	}
 
-	// Snapshot globals.
 	oldPhotos, oldCache := photosDir, cacheDir
 	oldTitle, oldVideo, oldBG, oldIcons, oldMedium := appTitle, videoEnabled, bgColor, iconsDir, mediumWidth
+	oldDB := db
 
-	imagesCacheMu.Lock()
-	oldImages, oldSet, oldSorted := imagesCache, imageCacheSet, sortedCache
-	imagesCacheMu.Unlock()
-
-	metaMu.Lock()
-	oldMeta, oldMetaPath := metaIndex, metaPath
-	metaMu.Unlock()
-
-	// Install clean state.
 	photosDir = photos
 	cacheDir = cache
 	appTitle = "Test Frame"
@@ -52,18 +44,14 @@ func setupTestEnv(t *testing.T) {
 	iconsDir = ""
 	mediumWidth = 2000
 
-	imagesCacheMu.Lock()
-	imagesCache = nil
-	imageCacheSet = nil
-	sortedCache = nil
-	imagesCacheMu.Unlock()
-
-	metaMu.Lock()
-	metaIndex = map[string]ImageMeta{}
-	metaPath = filepath.Join(cache, "meta.json")
-	metaMu.Unlock()
+	testDB, err := openDB(":memory:")
+	if err != nil {
+		t.Fatalf("setupTestEnv openDB: %v", err)
+	}
+	db = testDB
 
 	t.Cleanup(func() {
+		testDB.Close()
 		photosDir = oldPhotos
 		cacheDir = oldCache
 		appTitle = oldTitle
@@ -71,17 +59,7 @@ func setupTestEnv(t *testing.T) {
 		bgColor = oldBG
 		iconsDir = oldIcons
 		mediumWidth = oldMedium
-
-		imagesCacheMu.Lock()
-		imagesCache = oldImages
-		imageCacheSet = oldSet
-		sortedCache = oldSorted
-		imagesCacheMu.Unlock()
-
-		metaMu.Lock()
-		metaIndex = oldMeta
-		metaPath = oldMetaPath
-		metaMu.Unlock()
+		db = oldDB
 	})
 }
 
@@ -93,8 +71,8 @@ func makeTestJPEG(w, h int) []byte {
 	return buf.Bytes()
 }
 
-// seedFile writes data to photosDir/name, adds it to imagesCache, and returns
-// the resulting ImageInfo.
+// seedFile writes data to photosDir/name, inserts it into the test database,
+// and returns the resulting ImageInfo.
 func seedFile(t *testing.T, name string, data []byte) ImageInfo {
 	t.Helper()
 	dst := filepath.Join(photosDir, name)
@@ -105,8 +83,17 @@ func seedFile(t *testing.T, name string, data []byte) ImageInfo {
 	if err != nil {
 		t.Fatalf("seedFile stat: %v", err)
 	}
-	small, medium, original := thumbURLs(name)
-	info := ImageInfo{
+	now := time.Now().UnixNano()
+	if _, err := db.Exec(
+		`INSERT OR REPLACE INTO files
+		 (path, filename, folder, file_type, width, height, size, file_mtime, date_taken, indexed_at)
+		 VALUES (?, ?, '', 'image', 0, 0, ?, ?, ?, ?)`,
+		name, name, fi.Size(), fi.ModTime().UnixNano(), fi.ModTime().UnixNano(), now,
+	); err != nil {
+		t.Fatalf("seedFile db insert: %v", err)
+	}
+	small, medium, original := thumbURLs(name, fi.ModTime())
+	return ImageInfo{
 		Filename:    name,
 		Path:        name,
 		ModTime:     fi.ModTime(),
@@ -116,8 +103,6 @@ func seedFile(t *testing.T, name string, data []byte) ImageInfo {
 		ThumbMedium: medium,
 		Original:    original,
 	}
-	cacheAdd(info)
-	return info
 }
 
 // doRequest fires a request directly at handler and returns the recorder.
@@ -188,7 +173,7 @@ func TestHandleConfig(t *testing.T) {
 // ── TestHandleImages ──────────────────────────────────────────────────────
 
 func TestHandleImages(t *testing.T) {
-	t.Run("empty cache returns zero total", func(t *testing.T) {
+	t.Run("empty database returns zero total", func(t *testing.T) {
 		setupTestEnv(t)
 		rr := doRequest(handleImages, http.MethodGet, "/api/images", nil, "")
 		if rr.Code != http.StatusOK {
@@ -235,9 +220,10 @@ func TestHandleImages(t *testing.T) {
 
 	t.Run("sort name asc", func(t *testing.T) {
 		setupTestEnv(t)
-		now := time.Now()
+		now := time.Now().UnixNano()
 		for _, name := range []string{"c.jpg", "a.jpg", "b.jpg"} {
-			cacheAdd(ImageInfo{Filename: name, Path: name, ModTime: now})
+			db.Exec(`INSERT INTO files (path,filename,folder,file_type,width,height,size,file_mtime,date_taken,indexed_at) VALUES (?,?,'','image',0,0,0,?,?,?)`, //nolint:errcheck
+				name, name, now, now, now)
 		}
 		rr := doRequest(handleImages, http.MethodGet, "/api/images?sort=name&order=asc", nil, "")
 		var resp ListResponse
@@ -249,15 +235,62 @@ func TestHandleImages(t *testing.T) {
 
 	t.Run("sort name desc", func(t *testing.T) {
 		setupTestEnv(t)
-		now := time.Now()
+		now := time.Now().UnixNano()
 		for _, name := range []string{"c.jpg", "a.jpg", "b.jpg"} {
-			cacheAdd(ImageInfo{Filename: name, Path: name, ModTime: now})
+			db.Exec(`INSERT INTO files (path,filename,folder,file_type,width,height,size,file_mtime,date_taken,indexed_at) VALUES (?,?,'','image',0,0,0,?,?,?)`, //nolint:errcheck
+				name, name, now, now, now)
 		}
 		rr := doRequest(handleImages, http.MethodGet, "/api/images?sort=name&order=desc", nil, "")
 		var resp ListResponse
 		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
 		if len(resp.Images) == 0 || resp.Images[0].Path != "c.jpg" {
 			t.Errorf("images[0].path = %q, want c.jpg", resp.Images[0].Path)
+		}
+	})
+
+	t.Run("filter by folder", func(t *testing.T) {
+		setupTestEnv(t)
+		now := time.Now().UnixNano()
+		rows := []struct{ path, folder string }{
+			{"vacation/a.jpg", "vacation"},
+			{"vacation/hawaii/b.jpg", "vacation/hawaii"},
+			{"c.jpg", ""},
+		}
+		for _, r := range rows {
+			db.Exec(`INSERT INTO files (path,filename,folder,file_type,width,height,size,file_mtime,date_taken,indexed_at) VALUES (?,?,?,'image',0,0,0,?,?,?)`, //nolint:errcheck
+				r.path, filepath.Base(r.path), r.folder, now, now, now)
+		}
+		rr := doRequest(handleImages, http.MethodGet, "/api/images?folder=vacation", nil, "")
+		var resp ListResponse
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if resp.Total != 2 {
+			t.Errorf("total = %d, want 2 (vacation + subfolder)", resp.Total)
+		}
+	})
+
+	t.Run("filter by type", func(t *testing.T) {
+		setupTestEnv(t)
+		now := time.Now().UnixNano()
+		db.Exec(`INSERT INTO files (path,filename,folder,file_type,width,height,size,file_mtime,date_taken,indexed_at) VALUES ('a.jpg','a.jpg','','image',0,0,0,?,?,?)`, now, now, now)   //nolint:errcheck
+		db.Exec(`INSERT INTO files (path,filename,folder,file_type,width,height,size,file_mtime,date_taken,indexed_at) VALUES ('b.mp4','b.mp4','','video',0,0,0,?,?,?)`, now, now, now)   //nolint:errcheck
+		rr := doRequest(handleImages, http.MethodGet, "/api/images?type=video", nil, "")
+		var resp ListResponse
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if resp.Total != 1 || resp.Images[0].Path != "b.mp4" {
+			t.Errorf("type filter: got total=%d path=%q, want 1 b.mp4", resp.Total, resp.Images[0].Path)
+		}
+	})
+
+	t.Run("search by filename", func(t *testing.T) {
+		setupTestEnv(t)
+		now := time.Now().UnixNano()
+		db.Exec(`INSERT INTO files (path,filename,folder,file_type,width,height,size,file_mtime,date_taken,indexed_at) VALUES ('beach_2024.jpg','beach_2024.jpg','','image',0,0,0,?,?,?)`, now, now, now) //nolint:errcheck
+		db.Exec(`INSERT INTO files (path,filename,folder,file_type,width,height,size,file_mtime,date_taken,indexed_at) VALUES ('mountain.jpg','mountain.jpg','','image',0,0,0,?,?,?)`, now, now, now)     //nolint:errcheck
+		rr := doRequest(handleImages, http.MethodGet, "/api/images?search=beach", nil, "")
+		var resp ListResponse
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if resp.Total != 1 || resp.Images[0].Path != "beach_2024.jpg" {
+			t.Errorf("search: got total=%d, want 1 beach_2024.jpg", resp.Total)
 		}
 	})
 }
@@ -293,7 +326,6 @@ func TestHandleUpload(t *testing.T) {
 
 	t.Run("missing file field returns 400", func(t *testing.T) {
 		setupTestEnv(t)
-		// Submit a multipart form with no "file" field.
 		var body bytes.Buffer
 		w := multipart.NewWriter(&body)
 		w.WriteField("other", "value") //nolint:errcheck
@@ -337,11 +369,10 @@ func TestHandleDelete(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(photosDir, "photo.jpg")); !os.IsNotExist(err) {
 			t.Error("file still exists on disk after delete")
 		}
-		imagesCacheMu.RLock()
-		_, inSet := imageCacheSet["photo.jpg"]
-		imagesCacheMu.RUnlock()
-		if inSet {
-			t.Error("photo.jpg still in imageCacheSet after delete")
+		var count int
+		db.QueryRow(`SELECT COUNT(*) FROM files WHERE path = 'photo.jpg'`).Scan(&count) //nolint:errcheck
+		if count != 0 {
+			t.Error("photo.jpg still in database after delete")
 		}
 	})
 

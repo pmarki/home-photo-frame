@@ -21,6 +21,7 @@ import (
 var (
 	photosDir    string
 	cacheDir     string
+	dbDir        string
 	serverPort   string
 	mediumWidth  int
 	appTitle     string
@@ -29,15 +30,8 @@ var (
 	iconsDir     string
 )
 
-// frontendFS is set by embed.go / embed_dev.go before main() runs.
 var frontendFS fs.FS
-
-// rawManifest holds the built manifest.webmanifest bytes, used as a template
-// for dynamic title injection. Populated once in main() after flag parsing.
 var rawManifest []byte
-
-// frontendHandler is provided by either embed.go (production) or embed_dev.go (dev build tag).
-// It returns an http.Handler that serves the compiled Vue frontend.
 var frontendHandler func() http.Handler
 
 func envOr(key, fallback string) string {
@@ -50,6 +44,12 @@ func envOr(key, fallback string) string {
 func main() {
 	flag.StringVar(&photosDir, "photos", envOr("PHOTOS_DIR", "./photos"), "directory containing source images (env: PHOTOS_DIR)")
 	flag.StringVar(&cacheDir, "cache", envOr("CACHE_DIR", "./cache"), "directory for thumbnail cache (env: CACHE_DIR)")
+
+	// Default DB directory: same directory as the running binary.
+	exePath, _ := os.Executable()
+	defaultDBDir := filepath.Dir(exePath)
+	flag.StringVar(&dbDir, "db-dir", envOr("DB_DIR", defaultDBDir), "directory for the SQLite database file (env: DB_DIR)")
+
 	flag.StringVar(&serverPort, "port", envOr("PORT", "8080"), "port to listen on (env: PORT)")
 	flag.StringVar(&appTitle, "title", envOr("APP_TITLE", "Photo Frame"), "app title shown in the browser tab and header (env: APP_TITLE)")
 	mediumWidthDefault := 2000
@@ -83,7 +83,7 @@ func main() {
 		}
 	}
 
-	for _, p := range []*string{&photosDir, &cacheDir} {
+	for _, p := range []*string{&photosDir, &cacheDir, &dbDir} {
 		abs, err := filepath.Abs(*p)
 		if err != nil {
 			log.Fatalf("cannot resolve path %s: %v", *p, err)
@@ -99,9 +99,9 @@ func main() {
 
 	log.Printf("photos : %s", photosDir)
 	log.Printf("cache  : %s", cacheDir)
+	log.Printf("db     : %s", filepath.Join(dbDir, "files.db"))
 	log.Printf("title  : %s", appTitle)
 
-	// Read the built manifest once so handleManifest can inject the title.
 	if frontendFS != nil {
 		if data, err := fs.ReadFile(frontendFS, "manifest.webmanifest"); err == nil {
 			rawManifest = data
@@ -110,13 +110,13 @@ func main() {
 		}
 	}
 
-	metaPath = filepath.Join(cacheDir, "meta.json")
-	loadMetaIndex()
-	safeLoop("meta-saver", runMetaSaver)
+	var err error
+	db, err = openDB(dbDir)
+	if err != nil {
+		log.Fatalf("database: %v", err)
+	}
 
-	// Build the initial image cache synchronously so the gallery is available
-	// immediately; warmup will update dimensions incrementally as it runs.
-	buildImagesCache()
+	syncFilesToDB(nil)
 
 	safeGo("warmup", warmupThumbnails)
 	go sweepOrphanedUploads()

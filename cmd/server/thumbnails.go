@@ -25,9 +25,9 @@ const thumbnailSize = 400
 
 var fileMu sync.Map
 
-// thumbHash returns a 16-char hex string that uniquely identifies the content
-// of a thumbnail: it changes whenever the source file's OS mtime changes,
-// ensuring browsers fetch a fresh thumbnail after an external edit.
+// thumbHash returns a 16-char hex string that changes whenever the source
+// file's OS mtime changes, ensuring browsers fetch a fresh thumbnail after
+// an external edit.
 func thumbHash(filename string, mtime time.Time) string {
 	h := sha256.Sum256([]byte(filename + "\x00" + strconv.FormatInt(mtime.UnixNano(), 10)))
 	return hex.EncodeToString(h[:8])
@@ -41,20 +41,10 @@ func thumbMediumCachePath(imgPath string) string {
 	return filepath.Join(cacheDir, "m", filepath.FromSlash(imgPath))
 }
 
-// thumbURLs returns the API URLs for the small thumbnail, medium thumbnail, and
-// original of imgPath. It reads FileMtime from metaIndex; if not yet recorded
-// it falls back to os.Stat. The hash in each URL changes when the source file's
-// mtime changes, ensuring browsers fetch fresh content after an edit.
-func thumbURLs(imgPath string) (small, medium, original string) {
-	metaMu.RLock()
-	meta := metaIndex[imgPath]
-	metaMu.RUnlock()
-	mtime := meta.FileMtime
-	if mtime.IsZero() {
-		if fi, err := os.Stat(filepath.Join(photosDir, filepath.FromSlash(imgPath))); err == nil {
-			mtime = fi.ModTime()
-		}
-	}
+// thumbURLs returns the API URLs for the small thumbnail, medium thumbnail,
+// and original of imgPath. mtime is the file's OS modification time used
+// for cache-busting.
+func thumbURLs(imgPath string, mtime time.Time) (small, medium, original string) {
 	h := thumbHash(imgPath, mtime)
 	enc := encodePathSegments(imgPath)
 	return "/api/thumb/" + h + "/" + enc,
@@ -69,7 +59,7 @@ func parseThumbPath(prefix, fullPath string) (hash, imgPath string, ok bool) {
 		return
 	}
 	hash = rest[:slash]
-	imgPath = rest[slash+1:] // r.URL.Path is already decoded by net/http; path may contain "/"
+	imgPath = rest[slash+1:]
 	if hash == "" || !isValidPath(imgPath) {
 		return
 	}
@@ -100,7 +90,6 @@ func serveCachedThumb(
 	}
 	cp := cachePath(imgPath)
 
-	// Cache hit: URL is content-addressed, safe to cache forever.
 	if _, err := os.Stat(cp); err == nil {
 		serveImmutable(w, r, cp)
 		return
@@ -151,8 +140,7 @@ func serveCachedThumb(
 			f.Close()
 		}
 	}
-	indexImage(imgPath, b.Dx(), b.Dy())
-	saveMetaIndex()
+	indexFileRecord(imgPath, b.Dx(), b.Dy())
 
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
@@ -182,11 +170,16 @@ func handleThumbMedium(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
+// warmupRec holds the database fields needed by warmupThumbnails to decide
+// whether a file needs re-processing without a per-file query.
+type warmupRec struct {
+	fileMtime time.Time
+	width     int
+}
+
 func warmupThumbnails() {
 	log.Println("warmup: cache pre-warming started")
 
-	// Tighter GC target keeps peak heap lower when many large image buffers are
-	// live concurrently. Restored (with an OS-level free) once warmup finishes.
 	prev := debug.SetGCPercent(20)
 	defer func() {
 		debug.SetGCPercent(prev)
@@ -194,21 +187,28 @@ func warmupThumbnails() {
 		log.Println("warmup: all thumbnails ready")
 	}()
 
-	// semFull bounds concurrent full-image decodes (each may hold tens of MB).
-	// semLight bounds header-only reads (DecodeConfig), which are cheap.
+	// Pre-load all stored records so we avoid per-file DB queries in the walk.
+	existing := make(map[string]warmupRec)
+	if rows, err := db.Query(`SELECT path, file_mtime, width FROM files`); err == nil {
+		for rows.Next() {
+			var p string
+			var ns int64
+			var w int
+			if rows.Scan(&p, &ns, &w) == nil {
+				existing[p] = warmupRec{fileMtime: time.Unix(0, ns), width: w}
+			}
+		}
+		rows.Close()
+	}
+
 	semFull := make(chan struct{}, 2)
 	semLight := make(chan struct{}, 8)
 	var wg sync.WaitGroup
 
 	walkPhotosDir(func(imgPath string, fi os.FileInfo) {
-		fileMtime := fi.ModTime()
-
-		metaMu.RLock()
-		meta := metaIndex[imgPath]
-		metaMu.RUnlock()
-
-		mtimeChanged := !meta.FileMtime.Equal(fileMtime)
-		hasDims := meta.Width > 0
+		rec := existing[imgPath]
+		mtimeChanged := !rec.fileMtime.Equal(fi.ModTime())
+		hasDims := rec.width > 0
 
 		needsSmall := func() bool {
 			_, err := os.Stat(thumbSmallCachePath(imgPath))
@@ -223,9 +223,8 @@ func warmupThumbnails() {
 			return
 		}
 
-		// Thumbnails already on disk, mtime unchanged, only dims are missing
-		// (e.g. meta.json was cleared). Read just the image header instead of
-		// decoding megapixels into RAM.
+		// Thumbnails already on disk, mtime unchanged — only dims are missing.
+		// Use DecodeConfig to read just the image header instead of full decode.
 		if !needsSmall && !needsMedium && !mtimeChanged && !isVideo(imgPath) {
 			wg.Add(1)
 			semLight <- struct{}{}
@@ -240,11 +239,10 @@ func warmupThumbnails() {
 				defer f.Close()
 				cfg, _, err := image.DecodeConfig(f)
 				if err != nil {
-					indexImage(p, 0, 0)
+					indexFileRecord(p, 0, 0)
 					return
 				}
 				w, h := cfg.Width, cfg.Height
-				// DecodeConfig ignores EXIF orientation; swap dims for 90°/270° images.
 				f.Seek(0, io.SeekStart) //nolint:errcheck
 				if x, err := exif.Decode(f); err == nil {
 					if tag, err := x.Get(exif.Orientation); err == nil {
@@ -253,7 +251,7 @@ func warmupThumbnails() {
 						}
 					}
 				}
-				indexImage(p, w, h)
+				indexFileRecord(p, w, h)
 			}(imgPath)
 			return
 		}
@@ -274,11 +272,11 @@ func warmupThumbnails() {
 			}
 			if err != nil {
 				log.Printf("warmup: open %s: %v", p, err)
-				indexImage(p, 0, 0)
+				indexFileRecord(p, 0, 0)
 				return
 			}
 			b := img.Bounds()
-			indexImage(p, b.Dx(), b.Dy())
+			indexFileRecord(p, b.Dx(), b.Dy())
 			if genSmall {
 				thumb := imaging.Fit(img, thumbnailSize, thumbnailSize, imaging.Lanczos)
 				cp := thumbSmallCachePath(p)
@@ -308,5 +306,4 @@ func warmupThumbnails() {
 		}(imgPath, needsSmall || mtimeChanged, needsMedium || mtimeChanged)
 	})
 	wg.Wait()
-	saveMetaIndex()
 }

@@ -12,7 +12,7 @@ Drop images into a folder, get a fast infinite-scroll gallery with full-screen l
 
 | Layer | Tech |
 |---|---|
-| Backend | Go 1.22 — `net/http`, `disintegration/imaging`, `fsnotify` |
+| Backend | Go 1.25 — `net/http`, `disintegration/imaging`, `fsnotify`, `modernc.org/sqlite` |
 | Frontend | Vue 3 · Vite 5 |
 | PWA / SW | `vite-plugin-pwa` · Workbox (injectManifest) |
 | Deployment | Single self-contained binary via `go:embed` |
@@ -24,8 +24,8 @@ Drop images into a folder, get a fast infinite-scroll gallery with full-screen l
 - **Lazy thumbnail loading** — thumbnails are requested 200 ms after they enter the viewport; scrolling away before the timer fires cancels the request entirely; images fade in on load so the broken-image icon never appears
 - **Thumbnail cache** — JPEG thumbnails (400 px small, configurable medium) cached under `cache/s/` and `cache/m/`, mirroring the source directory structure; URL hash changes on file modification so browsers never show stale thumbnails or originals
 - **Efficient warmup** — at startup, already-cached thumbnails use `image.DecodeConfig` (reads only the image header, ~1 KB) to recover stored dimensions instead of decoding the full image; full decodes are limited to 2 concurrent workers to bound peak memory; GC is tuned aggressively during warmup and heap is returned to the OS afterward
-- **File watcher** — detects images added, edited, or removed externally (inotify) and keeps the in-memory index in sync without a restart; watches subdirectories recursively and picks up newly created directories automatically
-- **Nightly reconcile** — runs at 03:00 local time to catch any drift between disk, in-memory cache, and metadata (handles missed watcher events, external deletions, etc.)
+- **File watcher** — detects images added, edited, or removed externally (inotify) and keeps the database in sync without a restart; watches subdirectories recursively and picks up newly created directories automatically
+- **Nightly reconcile** — runs at 03:00 local time to catch any drift between disk and database (handles missed watcher events, external deletions, etc.)
 - **Lightbox** — full-screen viewer with slide transitions; double-click or double-tap to zoom to 2× centred on the tap point; drag to pan while zoomed; swipe-to-navigate disabled while zoomed
 - **Lightbox footer** — shows the relative file path (e.g. `vacation/2024/photo.jpg`); click/tap to copy to clipboard
 - **In-app crop** — drag-to-select crop UI; saves a new file, deletes the original
@@ -42,7 +42,7 @@ Drop images into a folder, get a fast infinite-scroll gallery with full-screen l
 
 ### Prerequisites
 
-- Go 1.22+ (`make install-go` will download it if missing)
+- Go 1.25+ (`make install-go` will download it if missing)
 - Node.js 18+ with npm
 
 ### First-time setup
@@ -83,7 +83,8 @@ make build          # builds frontend, compiles binary with embedded assets
 | Flag | Env var | Default | Description |
 |---|---|---|---|
 | `-photos` | `PHOTOS_DIR` | `./photos` | Directory containing source images |
-| `-cache` | `CACHE_DIR` | `./cache` | Directory for thumbnail cache and metadata |
+| `-cache` | `CACHE_DIR` | `./cache` | Directory for thumbnail cache |
+| `-db-dir` | `DB_DIR` | *(binary directory)* | Directory for the SQLite database file (`files.db`) |
 | `-port` | `PORT` | `8080` | Port to listen on (`8080` or `:8080`) |
 | `-title` | `APP_TITLE` | `Photo Frame` | App title shown in the browser tab, header, and PWA manifest |
 | `-medium-width` | `MEDIUM_WIDTH` | `2000` | Max pixel width for medium thumbnails used in the lightbox |
@@ -104,8 +105,11 @@ docker build -t photo-frame .
 docker run -p 8080:8080 \
   -v /path/to/photos:/data/photos \
   -v /path/to/cache:/data/cache \
+  -e DB_DIR=/data/cache \
   photo-frame
 ```
+
+> **Note:** Set `DB_DIR` to a persistent volume path (e.g. the same as `CACHE_DIR`). By default the database is created next to the binary inside the container, which is lost on container restart.
 
 **Docker Compose**
 
@@ -129,6 +133,7 @@ services:
     environment:
       APP_TITLE: Living Room Frame
       BG_COLOR: "#0a0a1a"
+      DB_DIR: /data/cache
     volumes:
       - /mnt/nas/photos:/data/photos
       - /mnt/nas/cache:/data/cache
@@ -211,14 +216,20 @@ Returns a sorted list of all images (or a paginated page when `limit` is supplie
 |---|---|---|---|
 | `sort` | `taken` \| `mtime` \| `name` | `taken` | Sort field. `taken` uses EXIF DateTimeOriginal → filename pattern `YYYYMMDD_HHMMSS` → file mtime. `mtime` sorts by OS modification time (useful to see recently added files first). `name` sorts by full relative path |
 | `order` | `asc` \| `desc` | `desc` | Sort direction |
-| `limit` | 1–10 000 | *(omit for all)* | Images per page. When omitted all images are returned in one response. The built-in frontend requests 5 000 per page |
+| `folder` | relative path | *(all)* | Limit results to a folder and all its subfolders. E.g. `folder=vacation` returns `vacation/a.jpg` and `vacation/hawaii/b.jpg`. Omit to return all files |
+| `type` | `image` \| `video` | *(all)* | Filter by file type |
+| `search` | string | *(none)* | Case-insensitive substring match on filename (not full path) |
+| `limit` | 1–10 000 | *(omit for all)* | Images per page. When omitted all matching files are returned in one response |
 | `page` | integer ≥ 1 | `1` | Page number (1-based); only meaningful when `limit` is set |
 
 **Example requests**
 
 ```
-GET /api/images?sort=date&order=desc          # all images
-GET /api/images?sort=date&order=desc&limit=20&page=2  # page 2, 20 per page
+GET /api/images?sort=taken&order=desc                        # all images
+GET /api/images?folder=vacation&sort=taken&order=desc        # vacation folder + subfolders
+GET /api/images?type=video                                   # videos only
+GET /api/images?search=beach&limit=20&page=1                 # filename search
+GET /api/images?sort=taken&order=desc&limit=20&page=2        # page 2, 20 per page
 ```
 
 **Response** `200 OK` `application/json`
@@ -352,7 +363,8 @@ Install the PWA from Chrome on Android ("Add to Home Screen"). After installatio
 │           ├── GalleryPlaceholder.vue    skeleton tile for not-yet-loaded images
 │           └── PostUploadCropQueue.vue   post-upload crop queue
 ├── photos/                   source images (not committed)
-└── cache/                    thumbnail cache (s/{filename}, m/{filename}) + meta.json (not committed)
+├── cache/                    thumbnail cache: s/{path}, m/{path} (not committed)
+└── files.db                  SQLite index (created next to binary; set DB_DIR to move it)
 ```
 
 ## Makefile targets
