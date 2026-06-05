@@ -1,4 +1,4 @@
-.PHONY: setup install-go deps icons frontend-install dev backend-dev frontend-dev build start clean
+.PHONY: setup install-go deps icons frontend-install dev backend-dev frontend-dev build start test clean
 
 GO        ?= $(shell which go 2>/dev/null || echo $(HOME)/go/bin/go)
 GOVERSION := 1.22.5
@@ -36,7 +36,7 @@ frontend-install:
 # Terminal 1: make backend-dev   (Go server, reads ./frontend/dist from disk)
 # Terminal 2: make frontend-dev  (Vite on :5173, proxies /api → :8080)
 backend-dev:
-	$(GO) run -tags dev . -photos ./photos -cache ./cache
+	$(GO) run -tags dev ./cmd/server/ -photos ./photos -cache ./cache
 
 frontend-dev:
 	cd frontend && npm run dev
@@ -53,8 +53,11 @@ dev:
 build: icons
 	@echo "Building frontend..."
 	cd frontend && npm run build
+	@echo "Staging embedded assets..."
+	rm -rf cmd/server/frontend/dist
+	cp -r frontend/dist cmd/server/frontend/dist
 	@echo "Compiling binary with embedded frontend..."
-	CGO_ENABLED=0 $(GO) build -ldflags="-s -w" -o $(BINARY) .
+	CGO_ENABLED=0 $(GO) build -ldflags="-s -w" -o $(BINARY) ./cmd/server/
 	@echo ""
 	@echo "Binary ready: ./$(BINARY)"
 	@echo "Run:  ./$(BINARY) -photos ./photos"
@@ -62,6 +65,10 @@ build: icons
 start: build
 	./$(BINARY) -photos ./photos -cache ./cache
 
+# ── Tests ─────────────────────────────────────────────────────────────
+test:
+	$(GO) test -race ./cmd/server/
+
 # ── Clean ─────────────────────────────────────────────────────────────
 clean:
-	rm -rf frontend/dist frontend/node_modules cache/*.thumb.jpg $(BINARY)
+	rm -rf frontend/dist frontend/node_modules cache/*.thumb.jpg $(BINARY) cmd/server/frontend/

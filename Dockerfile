@@ -13,9 +13,9 @@ FROM golang:1.22-alpine AS backend
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
-COPY *.go ./
-COPY --from=frontend /app/frontend/dist ./frontend/dist
-RUN go build -o photo-frame .
+COPY cmd/ ./cmd/
+COPY --from=frontend /app/frontend/dist ./cmd/server/frontend/dist
+RUN go build -o photo-frame ./cmd/server/
 
 # ── Stage 3: minimal runtime image ───────────────────────────────────────────
 FROM alpine:3.20

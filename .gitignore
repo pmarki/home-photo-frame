@@ -15,6 +15,7 @@
 # Frontend dependencies and build output
 node_modules/
 /frontend/dist/
+/cmd/server/frontend/
 
 # Environment / secrets
 .env
