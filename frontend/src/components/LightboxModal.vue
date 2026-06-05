@@ -71,7 +71,7 @@
     </div>
 
     <!-- Image area -->
-    <div class="lb-stage">
+    <div class="lb-stage" ref="stageRef">
       <!-- Prev / Next buttons -->
       <button
         v-if="currentIndex > 0"
@@ -87,24 +87,34 @@
 
       <transition :name="transitionName" mode="out-in">
         <div class="lb-image-wrap" :key="currentIndex">
-          <video
-            v-if="isVideo(currentImage.filename)"
-            :src="currentImage.original"
-            class="lb-image"
-            :class="{ loaded: imgLoaded }"
-            autoplay muted loop playsinline controls
-            @loadeddata="imgLoaded = true"
-            @error="imgError = true"
-          />
-          <img
-            v-else
-            :src="currentImage.original"
-            :alt="currentImage.filename"
-            class="lb-image"
-            :class="{ loaded: imgLoaded }"
-            @load="imgLoaded = true"
-            @error="imgError = true"
-          />
+          <div
+            class="lb-zoom-wrap"
+            :style="zoomedStyle"
+            @dblclick="onDblClick"
+            @pointerdown="onPanStart"
+            @pointermove="onPanMove"
+            @pointerup="onPanEnd"
+            @pointercancel="onPanEnd"
+          >
+            <video
+              v-if="isVideo(currentImage.filename)"
+              :src="currentImage.original"
+              class="lb-image"
+              :class="{ loaded: imgLoaded }"
+              autoplay muted loop playsinline controls
+              @loadeddata="imgLoaded = true"
+              @error="imgError = true"
+            />
+            <img
+              v-else
+              :src="currentImage.original"
+              :alt="currentImage.filename"
+              class="lb-image"
+              :class="{ loaded: imgLoaded }"
+              @load="imgLoaded = true"
+              @error="imgError = true"
+            />
+          </div>
           <div v-if="!imgLoaded && !imgError" class="lb-spinner-wrap" aria-hidden="true">
             <div class="spinner" />
           </div>
@@ -128,7 +138,7 @@
 
     <!-- Bottom bar -->
     <div class="lb-footer">
-      <span class="lb-counter">{{ currentIndex + 1 }} / {{ hasMore ? images.length + '+' : images.length }}</span>
+      <span class="lb-path" :class="{ copied: pathCopied }" @click="copyPath" title="Copy path">{{ pathCopied ? 'Copied!' : currentImage.path }}</span>
       <span class="lb-date">{{ formatDate(currentImage.modTime) }}</span>
     </div>
   </div>
@@ -146,6 +156,7 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'need-more', 'deleted', 'cropped'])
 
+const stageRef     = ref(null)
 const currentIndex = ref(props.initialIndex)
 const imgLoaded    = ref(false)
 const imgError     = ref(false)
@@ -155,6 +166,24 @@ const deleteArmed  = ref(false)
 const deleting     = ref(false)
 const cropping     = ref(false)
 const actionError  = ref('')
+const pathCopied   = ref(false)
+const zoomed       = ref(false)
+const zoomPanX     = ref(0)
+const zoomPanY     = ref(0)
+const isPanning    = ref(false)
+let panStart       = null
+let lastTapTime    = 0
+let touchPanX      = 0
+let touchPanY      = 0
+
+const zoomedStyle = computed(() => {
+  if (!zoomed.value) return { cursor: 'zoom-in', transition: 'transform 0.25s ease' }
+  return {
+    transform: `translate(${zoomPanX.value}px, ${zoomPanY.value}px) scale(2)`,
+    transition: isPanning.value ? 'none' : 'transform 0.25s ease',
+    cursor: isPanning.value ? 'grabbing' : 'grab',
+  }
+})
 
 const isVideo = (filename) => /\.(mp4|webm|mov|m4v)$/i.test(filename ?? '')
 
@@ -166,6 +195,58 @@ function openCrop() {
 
 function cancelCrop() {
   cropping.value = false
+}
+
+async function copyPath() {
+  const p = currentImage.value.path
+  if (!p) return
+  try {
+    await navigator.clipboard.writeText(p)
+    pathCopied.value = true
+    setTimeout(() => { pathCopied.value = false }, 1500)
+  } catch {
+    // clipboard access denied — silently ignore
+  }
+}
+
+function resetZoom() {
+  zoomed.value = false
+  zoomPanX.value = 0
+  zoomPanY.value = 0
+  isPanning.value = false
+  panStart = null
+}
+
+function toggleZoom(clientX, clientY) {
+  if (zoomed.value) { resetZoom(); return }
+  const rect = stageRef.value.getBoundingClientRect()
+  zoomPanX.value = -(clientX - rect.left - rect.width / 2)
+  zoomPanY.value = -(clientY - rect.top - rect.height / 2)
+  zoomed.value = true
+}
+
+function onDblClick(e) {
+  if (isVideo(currentImage.value.filename)) return
+  toggleZoom(e.clientX, e.clientY)
+}
+
+function onPanStart(e) {
+  if (!zoomed.value || e.pointerType === 'touch') return
+  isPanning.value = true
+  panStart = { x: e.clientX - zoomPanX.value, y: e.clientY - zoomPanY.value }
+  e.currentTarget.setPointerCapture(e.pointerId)
+}
+
+function onPanMove(e) {
+  if (!isPanning.value || e.pointerType === 'touch') return
+  zoomPanX.value = e.clientX - panStart.x
+  zoomPanY.value = e.clientY - panStart.y
+}
+
+function onPanEnd(e) {
+  if (e.pointerType === 'touch') return
+  isPanning.value = false
+  panStart = null
 }
 
 function onCloseClick() {
@@ -209,19 +290,20 @@ async function shareOrDownload() {
   }
 }
 
-const currentImage = computed(() => props.images[currentIndex.value] ?? { filename: '', modTime: null })
+const currentImage = computed(() => props.images[currentIndex.value] ?? { filename: '', path: '', modTime: null })
 
 async function applyCrop(rect) {
-  const filename = currentImage.value.filename
+  const imgPath = currentImage.value.path || currentImage.value.filename
+  const encodedPath = imgPath.split('/').map(encodeURIComponent).join('/')
   try {
-    const res = await fetch(`/api/crop/${encodeURIComponent(filename)}`, {
+    const res = await fetch(`/api/crop/${encodedPath}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(rect),
     })
     if (!res.ok) throw new Error(await res.text())
     const newImage = await res.json()
-    emit('cropped', filename, newImage)
+    emit('cropped', imgPath, newImage)
   } catch (e) {
     console.error('crop failed:', e)
     actionError.value = e.message || 'Crop failed'
@@ -238,16 +320,17 @@ async function onDeleteClick() {
     return
   }
   deleting.value = true
-  const filename = currentImage.value.filename
+  const imgPath = currentImage.value.path || currentImage.value.filename
+  const encodedPath = imgPath.split('/').map(encodeURIComponent).join('/')
   try {
-    const res = await fetch(`/api/delete/${encodeURIComponent(filename)}`, { method: 'DELETE' })
+    const res = await fetch(`/api/delete/${encodedPath}`, { method: 'DELETE' })
     if (!res.ok) throw new Error(`Server error ${res.status}`)
     // Clamp index before notifying parent so the lightbox shows the right image immediately
     const newLen = props.images.length - 1
     if (currentIndex.value >= newLen && newLen > 0) {
       currentIndex.value = newLen - 1
     }
-    emit('deleted', filename)
+    emit('deleted', imgPath)
   } catch (e) {
     console.error('delete failed:', e)
     actionError.value = e.message || 'Delete failed'
@@ -266,9 +349,9 @@ function navigate(dir) {
   imgError.value  = false
   deleteArmed.value = false
   cropping.value = false
+  resetZoom()
   currentIndex.value = next
 
-  // Trigger background load when 3 images from the end
   if (next >= props.images.length - 3 && props.hasMore) {
     emit('need-more')
   }
@@ -289,16 +372,37 @@ let touchStartX = 0
 let touchStartY = 0
 
 function onTouchStart(e) {
-  touchStartX = e.touches[0].clientX
-  touchStartY = e.touches[0].clientY
+  if (e.touches.length !== 1) return
+  touchStartX = touchPanX = e.touches[0].clientX
+  touchStartY = touchPanY = e.touches[0].clientY
+}
+
+function onTouchMove(e) {
+  if (!zoomed.value || e.touches.length !== 1) return
+  e.preventDefault()
+  const t = e.touches[0]
+  zoomPanX.value += t.clientX - touchPanX
+  zoomPanY.value += t.clientY - touchPanY
+  touchPanX = t.clientX
+  touchPanY = t.clientY
 }
 
 function onTouchEnd(e) {
   if (cropping.value) return
-  const dx = touchStartX - e.changedTouches[0].clientX
-  const dy = Math.abs(touchStartY - e.changedTouches[0].clientY)
-  // Only treat as horizontal swipe if horizontal movement dominates
-  if (Math.abs(dx) > 50 && Math.abs(dx) > dy * 1.5) {
+  const now = Date.now()
+  const t = e.changedTouches[0]
+  const dx = touchStartX - t.clientX
+  const dy = touchStartY - t.clientY
+  // Double-tap → toggle zoom (takes priority over swipe)
+  if (Math.abs(dx) < 20 && Math.abs(dy) < 20 && now - lastTapTime < 300) {
+    toggleZoom(t.clientX, t.clientY)
+    lastTapTime = 0
+    return
+  }
+  lastTapTime = now
+  // Swipe navigation disabled while zoomed
+  if (zoomed.value) return
+  if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) {
     navigate(dx > 0 ? 1 : -1)
   }
 }
@@ -331,6 +435,7 @@ defineExpose({
 onMounted(() => {
   document.addEventListener('keydown', onKeydown)
   document.addEventListener('touchstart', onTouchStart, { passive: true })
+  document.addEventListener('touchmove', onTouchMove, { passive: false })
   document.addEventListener('touchend', onTouchEnd, { passive: true })
   document.body.style.overflow = 'hidden'
 })
@@ -338,6 +443,7 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener('keydown', onKeydown)
   document.removeEventListener('touchstart', onTouchStart)
+  document.removeEventListener('touchmove', onTouchMove)
   document.removeEventListener('touchend', onTouchEnd)
   document.body.style.overflow = ''
 })
@@ -440,6 +546,16 @@ onUnmounted(() => {
   inset: 0;
 }
 
+.lb-zoom-wrap {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform-origin: center center;
+  touch-action: none;
+}
+
 .lb-image {
   max-width: 100%;
   max-height: 100%;
@@ -508,8 +624,19 @@ onUnmounted(() => {
   background: rgba(0,0,0,0.5);
 }
 
-.lb-counter { font-size: 0.82rem; color: #777; }
-.lb-date    { font-size: 0.78rem; color: #555; }
+.lb-path {
+  font-size: 0.78rem;
+  color: #666;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.lb-path:hover { color: #999; }
+.lb-path.copied { color: #6ee7b7; }
+.lb-date { font-size: 0.78rem; color: #555; flex-shrink: 0; }
 
 /* ─── Slide transitions ────────────────────────────────────────────── */
 .slide-next-enter-active,

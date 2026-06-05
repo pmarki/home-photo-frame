@@ -25,15 +25,16 @@
           class="gallery-item"
           role="listitem"
           :aria-label="img.filename"
-          :style="{ '--cover-scale': coverScale(img) }"
+          :class="{ 'has-dims': img.width && img.height }"
+          :style="img.width && img.height ? { '--cover-scale': coverScale(img) } : {}"
           @click="$emit('open', startIdx + i)"
         >
           <img
-            :src="img.thumbSmall"
+            v-lazy-src="img.thumbSmall"
             :alt="img.filename"
-            loading="lazy"
             decoding="async"
             class="gallery-thumb"
+            @load="e => e.target.style.opacity = '1'"
             @error="onImgError"
           />
           <div v-if="isVideo(img.filename)" class="video-badge" aria-hidden="true">▶</div>
@@ -107,6 +108,26 @@ const { yearItems, currentYear, visible: yearVisible, handlePos, maxScrollY } = 
   viewportHeight,
 })
 
+// Delay setting img.src until the item has been in view for 200 ms.
+// If the item scrolls out before the timer fires (fast scroll), unmounted
+// clears the timer and the thumbnail request never happens.
+const vLazySrc = {
+  mounted(el, { value }) {
+    el._lazySrcTimer = setTimeout(() => { el.src = value }, 200)
+  },
+  updated(el, { value, oldValue }) {
+    if (value !== oldValue) {
+      clearTimeout(el._lazySrcTimer)
+      el.style.opacity = '0'
+      el._lazySrcTimer = setTimeout(() => { el.src = value }, 200)
+    }
+  },
+  unmounted(el) {
+    clearTimeout(el._lazySrcTimer)
+    el.removeAttribute('src')
+  },
+}
+
 const isVideo = (filename) => /\.(mp4|webm|mov|m4v)$/i.test(filename ?? '')
 
 function coverScale(img) {
@@ -179,10 +200,16 @@ function imgOrientation(img) {
 .gallery-thumb {
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: cover;    /* fills cell when dimensions are unknown */
   display: block;
+  opacity: 0;
+  transition: opacity 0.15s, transform 0.3s ease;
+}
+
+/* When dimensions are known: use contain + scale so hover can reveal the full image */
+.has-dims .gallery-thumb {
+  object-fit: contain;
   transform: scale(var(--cover-scale, 1));
-  transition: transform 0.3s ease;
 }
 
 /* ─── Orientation badge ─────────────────────────────────────────────── */
@@ -216,8 +243,8 @@ function imgOrientation(img) {
 .orientation-badge.portrait  { width: 11px; height: 16px; }
 .orientation-badge.square    { width: 13px; height: 13px; }
 
-.gallery-item:hover .gallery-thumb,
-.gallery-item:focus-visible .gallery-thumb {
+.gallery-item.has-dims:hover .gallery-thumb,
+.gallery-item.has-dims:focus-visible .gallery-thumb {
   transform: scale(1);
 }
 

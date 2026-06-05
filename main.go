@@ -18,6 +18,9 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -106,6 +109,22 @@ var supportedExts = map[string]bool{
 // isValidFilename rejects empty names, names containing path separators, and "..".
 func isValidFilename(filename string) bool {
 	return filename != "" && !strings.ContainsAny(filename, "/\\") && filename != ".." && filename != "."
+}
+
+// isValidPath accepts a forward-slash-separated relative path where every
+// component passes isValidFilename. Root-level files ("photo.jpg") are valid;
+// so are nested paths ("vacation/photo.jpg"). Leading/trailing slashes and ".."
+// traversal are rejected.
+func isValidPath(p string) bool {
+	if p == "" || path.Clean(p) != p {
+		return false
+	}
+	for _, part := range strings.Split(p, "/") {
+		if !isValidFilename(part) {
+			return false
+		}
+	}
+	return true
 }
 
 // ── Image metadata index ──────────────────────────────────────────────────
@@ -202,9 +221,10 @@ func extractBestDate(filename, srcPath string) time.Time {
 }
 
 // indexImage extracts and stores the best date, OS mtime, and (optionally) dimensions
-// for filename. Pass w=0,h=0 when dimensions are not yet known.
-func indexImage(filename string, w, h int) {
-	srcPath := filepath.Join(photosDir, filename)
+// for imgPath (a "/" -separated path relative to photosDir). Pass w=0,h=0 when
+// dimensions are not yet known.
+func indexImage(imgPath string, w, h int) {
+	srcPath := filepath.Join(photosDir, filepath.FromSlash(imgPath))
 
 	var fileMtime time.Time
 	if fi, err := os.Stat(srcPath); err == nil {
@@ -212,7 +232,7 @@ func indexImage(filename string, w, h int) {
 	}
 
 	metaMu.RLock()
-	existing, exists := metaIndex[filename]
+	existing, exists := metaIndex[imgPath]
 	metaMu.RUnlock()
 
 	// Skip if fully indexed, no new dimensions, and file hasn't changed.
@@ -224,7 +244,7 @@ func indexImage(filename string, w, h int) {
 	// Re-extract date if file is new or its mtime changed.
 	date := existing.Date
 	if !exists || date.IsZero() || (!fileMtime.IsZero() && !existing.FileMtime.Equal(fileMtime)) {
-		date = extractBestDate(filename, srcPath)
+		date = extractBestDate(imgPath, srcPath)
 	}
 
 	width, height := existing.Width, existing.Height
@@ -233,18 +253,18 @@ func indexImage(filename string, w, h int) {
 	}
 
 	metaMu.Lock()
-	metaIndex[filename] = ImageMeta{Date: date, FileMtime: fileMtime, Width: width, Height: height}
+	metaIndex[imgPath] = ImageMeta{Date: date, FileMtime: fileMtime, Width: width, Height: height}
 	metaMu.Unlock()
 
 	if w > 0 {
-		cacheUpdateDimensions(filename, width, height)
+		cacheUpdateDimensions(imgPath, width, height)
 	}
 }
 
-// bestDate returns the indexed date for filename, or fallback if not in index.
-func bestDate(filename string, fallback time.Time) time.Time {
+// bestDate returns the indexed date for imgPath, or fallback if not in index.
+func bestDate(imgPath string, fallback time.Time) time.Time {
 	metaMu.RLock()
-	meta, ok := metaIndex[filename]
+	meta, ok := metaIndex[imgPath]
 	metaMu.RUnlock()
 	if ok {
 		return meta.Date
@@ -258,43 +278,63 @@ func bestDate(filename string, fallback time.Time) time.Time {
 
 var (
 	imagesCache   []ImageInfo
+	imageCacheSet map[string]struct{} // path → present; kept in sync with imagesCache
 	imagesCacheMu sync.RWMutex
-	sortedCache   map[string][]ImageInfo // keyed "by:order"; nil means invalid, cleared on any mutation
+	sortedCache   map[string][]int // keyed "by:order"; nil means invalid, cleared on any mutation
 )
 
-// buildImagesCache reads the photos directory and rebuilds imagesCache from scratch.
-// Called at startup (after loadMetaIndex) so the gallery is immediately available,
-// and again at the end of warmup to pick up any newly discovered metadata.
-func buildImagesCache() {
-	entries, err := os.ReadDir(photosDir)
-	if err != nil {
-		log.Printf("cache: cannot read photos dir: %v", err)
-		return
-	}
-	list := make([]ImageInfo, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		ext := strings.ToLower(filepath.Ext(e.Name()))
-		if !supportedExts[ext] {
-			continue
-		}
-		fi, err := e.Info()
+// walkPhotosDir calls fn for every supported media file found recursively under
+// photosDir. imgPath is the "/" -separated path relative to photosDir.
+func walkPhotosDir(fn func(imgPath string, fi os.FileInfo)) {
+	filepath.WalkDir(photosDir, func(absPath string, d fs.DirEntry, err error) error { //nolint:errcheck
 		if err != nil {
-			continue
+			log.Printf("walk: %s: %v", absPath, err)
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !supportedExts[strings.ToLower(filepath.Ext(d.Name()))] {
+			return nil
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(photosDir, absPath)
+		if err != nil {
+			return nil
+		}
+		fn(filepath.ToSlash(rel), fi)
+		return nil
+	})
+}
+
+// buildImagesCache reads the photos directory recursively and rebuilds imagesCache
+// from scratch. Called at startup (after loadMetaIndex) so the gallery is
+// immediately available, and again at the end of warmup to pick up any newly
+// discovered metadata.
+func buildImagesCache() {
+	log.Println("scan: building image cache")
+	list := make([]ImageInfo, 0, 256)
+	lastDir := ""
+	walkPhotosDir(func(imgPath string, fi os.FileInfo) {
+		if dir := path.Dir(imgPath); dir != lastDir {
+			lastDir = dir
+			log.Printf("scan: indexing %s", dir)
 		}
 		metaMu.RLock()
-		meta := metaIndex[e.Name()]
+		meta := metaIndex[imgPath]
 		metaMu.RUnlock()
 		fileMtime := meta.FileMtime
 		if fileMtime.IsZero() {
 			fileMtime = fi.ModTime()
 		}
-		small, medium, original := thumbURLs(e.Name())
+		small, medium, original := thumbURLs(imgPath)
 		list = append(list, ImageInfo{
-			Filename:    e.Name(),
-			ModTime:     bestDate(e.Name(), fi.ModTime()),
+			Filename:    filepath.Base(imgPath),
+			Path:        imgPath,
+			ModTime:     bestDate(imgPath, fi.ModTime()),
 			FileMtime:   fileMtime,
 			Size:        fi.Size(),
 			Width:       meta.Width,
@@ -303,31 +343,40 @@ func buildImagesCache() {
 			ThumbMedium: medium,
 			Original:    original,
 		})
+	})
+	set := make(map[string]struct{}, len(list))
+	for _, img := range list {
+		set[img.Path] = struct{}{}
 	}
 	imagesCacheMu.Lock()
 	imagesCache = list
+	imageCacheSet = set
 	sortedCache = nil
 	imagesCacheMu.Unlock()
+	log.Printf("scan: image cache built (%d files)", len(list))
 }
 
 func cacheAdd(info ImageInfo) {
 	imagesCacheMu.Lock()
-	for _, img := range imagesCache {
-		if img.Filename == info.Filename {
-			imagesCacheMu.Unlock()
-			return
-		}
+	if _, exists := imageCacheSet[info.Path]; exists {
+		imagesCacheMu.Unlock()
+		return
 	}
 	imagesCache = append(imagesCache, info)
+	if imageCacheSet == nil {
+		imageCacheSet = make(map[string]struct{})
+	}
+	imageCacheSet[info.Path] = struct{}{}
 	sortedCache = nil
 	imagesCacheMu.Unlock()
 }
 
-func cacheRemove(filename string) {
+func cacheRemove(imgPath string) {
 	imagesCacheMu.Lock()
 	for i, img := range imagesCache {
-		if img.Filename == filename {
+		if img.Path == imgPath {
 			imagesCache = append(imagesCache[:i], imagesCache[i+1:]...)
+			delete(imageCacheSet, imgPath)
 			break
 		}
 	}
@@ -335,11 +384,11 @@ func cacheRemove(filename string) {
 	imagesCacheMu.Unlock()
 }
 
-func cacheUpdateDimensions(filename string, w, h int) {
-	small, medium, original := thumbURLs(filename)
+func cacheUpdateDimensions(imgPath string, w, h int) {
+	small, medium, original := thumbURLs(imgPath)
 	imagesCacheMu.Lock()
 	for i, img := range imagesCache {
-		if img.Filename == filename {
+		if img.Path == imgPath {
 			imagesCache[i].Width = w
 			imagesCache[i].Height = h
 			imagesCache[i].ThumbSmall = small
@@ -355,9 +404,10 @@ func cacheUpdateDimensions(filename string, w, h int) {
 // ── Image list ────────────────────────────────────────────────────────────
 
 type ImageInfo struct {
-	Filename    string    `json:"filename"`
-	ModTime     time.Time `json:"modTime"`  // best date: EXIF → filename pattern → mtime
-	FileMtime   time.Time `json:"-"`        // OS mtime, used for "date modified" sort
+	Filename    string    `json:"filename"`            // basename only, e.g. "photo.jpg"
+	Path        string    `json:"path"`                // relative path, e.g. "vacation/photo.jpg"
+	ModTime     time.Time `json:"modTime"`             // best date: EXIF → filename pattern → mtime
+	FileMtime   time.Time `json:"-"`                   // OS mtime, used for "date modified" sort
 	Size        int64     `json:"size"`
 	Width       int       `json:"width,omitempty"`
 	Height      int       `json:"height,omitempty"`
@@ -383,30 +433,41 @@ func thumbHash(filename string, mtime time.Time) string {
 	return hex.EncodeToString(h[:8])
 }
 
-func thumbSmallCachePath(filename string) string {
-	return filepath.Join(cacheDir, "s", filename)
+func thumbSmallCachePath(imgPath string) string {
+	return filepath.Join(cacheDir, "s", filepath.FromSlash(imgPath))
 }
 
-func thumbMediumCachePath(filename string) string {
-	return filepath.Join(cacheDir, "m", filename)
+func thumbMediumCachePath(imgPath string) string {
+	return filepath.Join(cacheDir, "m", filepath.FromSlash(imgPath))
+}
+
+// encodePathSegments percent-encodes each "/" -separated path component so that
+// slashes in the URL are real separators and special characters within each
+// component are safely escaped.
+func encodePathSegments(p string) string {
+	parts := strings.Split(p, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
 }
 
 // thumbURLs returns the API URLs for the small thumbnail, medium thumbnail, and
-// original of filename. It reads FileMtime from metaIndex; if not yet recorded
+// original of imgPath. It reads FileMtime from metaIndex; if not yet recorded
 // it falls back to os.Stat. The hash in each URL changes when the source file's
 // mtime changes, ensuring browsers fetch fresh content after an edit.
-func thumbURLs(filename string) (small, medium, original string) {
+func thumbURLs(imgPath string) (small, medium, original string) {
 	metaMu.RLock()
-	meta := metaIndex[filename]
+	meta := metaIndex[imgPath]
 	metaMu.RUnlock()
 	mtime := meta.FileMtime
 	if mtime.IsZero() {
-		if fi, err := os.Stat(filepath.Join(photosDir, filename)); err == nil {
+		if fi, err := os.Stat(filepath.Join(photosDir, filepath.FromSlash(imgPath))); err == nil {
 			mtime = fi.ModTime()
 		}
 	}
-	h := thumbHash(filename, mtime)
-	enc := url.PathEscape(filename)
+	h := thumbHash(imgPath, mtime)
+	enc := encodePathSegments(imgPath)
 	return "/api/thumb/" + h + "/" + enc,
 		"/api/thumb-medium/" + h + "/" + enc,
 		"/api/original/" + h + "/" + enc
@@ -475,46 +536,50 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// sortImageSlice sorts images in place. Uses SliceStable with a filename tiebreaker
+// sortImageSlice sorts images in place. Uses SliceStable with a path tiebreaker
 // so pagination is deterministic even when multiple images share the same date.
-func sortImageSlice(images []ImageInfo, by, order string) {
+func sortIndices(indices []int, images []ImageInfo, by, order string) {
 	switch by {
 	case "name":
 		if order == "desc" {
-			sort.SliceStable(images, func(i, j int) bool { return images[i].Filename > images[j].Filename })
+			sort.SliceStable(indices, func(i, j int) bool { return images[indices[i]].Path > images[indices[j]].Path })
 		} else {
-			sort.SliceStable(images, func(i, j int) bool { return images[i].Filename < images[j].Filename })
+			sort.SliceStable(indices, func(i, j int) bool { return images[indices[i]].Path < images[indices[j]].Path })
 		}
 	case "mtime":
 		if order == "asc" {
-			sort.SliceStable(images, func(i, j int) bool {
-				if images[i].FileMtime.Equal(images[j].FileMtime) {
-					return images[i].Filename < images[j].Filename
+			sort.SliceStable(indices, func(i, j int) bool {
+				a, b := images[indices[i]], images[indices[j]]
+				if a.FileMtime.Equal(b.FileMtime) {
+					return a.Path < b.Path
 				}
-				return images[i].FileMtime.Before(images[j].FileMtime)
+				return a.FileMtime.Before(b.FileMtime)
 			})
 		} else {
-			sort.SliceStable(images, func(i, j int) bool {
-				if images[i].FileMtime.Equal(images[j].FileMtime) {
-					return images[i].Filename < images[j].Filename
+			sort.SliceStable(indices, func(i, j int) bool {
+				a, b := images[indices[i]], images[indices[j]]
+				if a.FileMtime.Equal(b.FileMtime) {
+					return a.Path < b.Path
 				}
-				return images[i].FileMtime.After(images[j].FileMtime)
+				return a.FileMtime.After(b.FileMtime)
 			})
 		}
 	default: // "taken", "date", or unspecified → sort by EXIF/best date
 		if order == "asc" {
-			sort.SliceStable(images, func(i, j int) bool {
-				if images[i].ModTime.Equal(images[j].ModTime) {
-					return images[i].Filename < images[j].Filename
+			sort.SliceStable(indices, func(i, j int) bool {
+				a, b := images[indices[i]], images[indices[j]]
+				if a.ModTime.Equal(b.ModTime) {
+					return a.Path < b.Path
 				}
-				return images[i].ModTime.Before(images[j].ModTime)
+				return a.ModTime.Before(b.ModTime)
 			})
 		} else {
-			sort.SliceStable(images, func(i, j int) bool {
-				if images[i].ModTime.Equal(images[j].ModTime) {
-					return images[i].Filename < images[j].Filename
+			sort.SliceStable(indices, func(i, j int) bool {
+				a, b := images[indices[i]], images[indices[j]]
+				if a.ModTime.Equal(b.ModTime) {
+					return a.Path < b.Path
 				}
-				return images[i].ModTime.After(images[j].ModTime)
+				return a.ModTime.After(b.ModTime)
 			})
 		}
 	}
@@ -530,35 +595,23 @@ func handleImages(w http.ResponseWriter, r *http.Request) {
 	if page < 1 {
 		page = 1
 	}
-	if limit < 1 || limit > 200 {
+	if limit < 1 || limit > 10000 {
 		limit = 50
 	}
 
 	key := sortBy + ":" + order
 
-	// Fast path: sorted view is already cached (avoids copy+sort on every request).
-	imagesCacheMu.RLock()
-	cached, hit := sortedCache[key]
-	imagesCacheMu.RUnlock()
-
-	if !hit {
-		// Slow path: build and cache the sorted view.
-		imagesCacheMu.Lock()
-		if cached, hit = sortedCache[key]; !hit {
-			cached = make([]ImageInfo, len(imagesCache))
-			copy(cached, imagesCache)
-			sortImageSlice(cached, sortBy, order)
-			if sortedCache == nil {
-				sortedCache = make(map[string][]ImageInfo)
+	// buildPage extracts a page of ImageInfo from a sorted index slice.
+	// Must be called with imagesCacheMu held.
+	buildPage := func(indices []int) ([]ImageInfo, int) {
+		total := len(indices)
+		if !paginate {
+			out := make([]ImageInfo, total)
+			for i, idx := range indices {
+				out[i] = imagesCache[idx]
 			}
-			sortedCache[key] = cached
+			return out, total
 		}
-		imagesCacheMu.Unlock()
-	}
-
-	total := len(cached)
-	var slice []ImageInfo
-	if paginate {
 		start := (page - 1) * limit
 		end := start + limit
 		if start > total {
@@ -567,9 +620,43 @@ func handleImages(w http.ResponseWriter, r *http.Request) {
 		if end > total {
 			end = total
 		}
-		slice = cached[start:end]
-	} else {
-		slice = cached
+		out := make([]ImageInfo, end-start)
+		for i, idx := range indices[start:end] {
+			out[i] = imagesCache[idx]
+		}
+		return out, total
+	}
+
+	var slice []ImageInfo
+	var total int
+
+	// Fast path: sorted index is already cached.
+	imagesCacheMu.RLock()
+	indices, hit := sortedCache[key]
+	if hit {
+		slice, total = buildPage(indices)
+	}
+	imagesCacheMu.RUnlock()
+
+	if !hit {
+		// Slow path: build and cache the sorted index.
+		imagesCacheMu.Lock()
+		if indices, hit = sortedCache[key]; !hit {
+			indices = make([]int, len(imagesCache))
+			for i := range indices {
+				indices[i] = i
+			}
+			sortIndices(indices, imagesCache, sortBy, order)
+			if sortedCache == nil {
+				sortedCache = make(map[string][]int)
+			}
+			sortedCache[key] = indices
+		}
+		slice, total = buildPage(indices)
+		imagesCacheMu.Unlock()
+	}
+
+	if !paginate {
 		page = 1
 		limit = total
 	}
@@ -585,15 +672,15 @@ func handleImages(w http.ResponseWriter, r *http.Request) {
 }
 
 
-func parseThumbPath(prefix, fullPath string) (hash, filename string, ok bool) {
+func parseThumbPath(prefix, fullPath string) (hash, imgPath string, ok bool) {
 	rest := strings.TrimPrefix(fullPath, prefix)
 	slash := strings.IndexByte(rest, '/')
 	if slash < 0 {
 		return
 	}
 	hash = rest[:slash]
-	filename = rest[slash+1:] // r.URL.Path is already decoded by net/http
-	if hash == "" || !isValidFilename(filename) {
+	imgPath = rest[slash+1:] // r.URL.Path is already decoded by net/http; path may contain "/"
+	if hash == "" || !isValidPath(imgPath) {
 		return
 	}
 	ok = true
@@ -616,12 +703,12 @@ func serveCachedThumb(
 	transform func(image.Image) image.Image,
 	quality int,
 ) {
-	_, filename, ok := parseThumbPath(prefix, r.URL.Path)
+	_, imgPath, ok := parseThumbPath(prefix, r.URL.Path)
 	if !ok {
 		http.Error(w, "invalid", http.StatusBadRequest)
 		return
 	}
-	cp := cachePath(filename)
+	cp := cachePath(imgPath)
 
 	// Cache hit: URL is content-addressed, safe to cache forever.
 	if _, err := os.Stat(cp); err == nil {
@@ -629,13 +716,13 @@ func serveCachedThumb(
 		return
 	}
 
-	srcPath := filepath.Join(photosDir, filename)
+	srcPath := filepath.Join(photosDir, filepath.FromSlash(imgPath))
 	if _, err := os.Stat(srcPath); err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 
-	rawMu, _ := fileMu.LoadOrStore(filename, &sync.Mutex{})
+	rawMu, _ := fileMu.LoadOrStore(imgPath, &sync.Mutex{})
 	mu := rawMu.(*sync.Mutex)
 	mu.Lock()
 	defer mu.Unlock()
@@ -647,7 +734,7 @@ func serveCachedThumb(
 
 	var img image.Image
 	var err error
-	if isVideo(filename) {
+	if isVideo(imgPath) {
 		img, err = extractVideoFrame(srcPath)
 	} else {
 		img, err = imaging.Open(srcPath, imaging.AutoOrientation(true))
@@ -665,6 +752,7 @@ func serveCachedThumb(
 		return
 	}
 	data := buf.Bytes()
+	os.MkdirAll(filepath.Dir(cp), 0o755) //nolint:errcheck
 	if f, err := os.Create(cp); err == nil {
 		if _, werr := f.Write(data); werr != nil {
 			f.Close()
@@ -673,7 +761,7 @@ func serveCachedThumb(
 			f.Close()
 		}
 	}
-	indexImage(filename, b.Dx(), b.Dy())
+	indexImage(imgPath, b.Dx(), b.Dy())
 	saveMetaIndex()
 
 	w.Header().Set("Content-Type", "image/jpeg")
@@ -707,20 +795,20 @@ func handleThumbMedium(w http.ResponseWriter, r *http.Request) {
 func handleOriginal(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/original/")
 	slash := strings.IndexByte(rest, '/')
-	var filename, cacheControl string
+	var imgPath, cacheControl string
 	if slash < 0 {
-		filename = rest
+		imgPath = rest
 		cacheControl = "public, max-age=3600"
 	} else {
-		filename = rest[slash+1:]
+		imgPath = rest[slash+1:]
 		cacheControl = "public, max-age=31536000, immutable"
 	}
-	if !isValidFilename(filename) {
-		http.Error(w, "invalid filename", http.StatusBadRequest)
+	if !isValidPath(imgPath) {
+		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Cache-Control", cacheControl)
-	http.ServeFile(w, r, filepath.Join(photosDir, filename))
+	http.ServeFile(w, r, filepath.Join(photosDir, filepath.FromSlash(imgPath)))
 }
 
 func handleUpload(w http.ResponseWriter, r *http.Request) {
@@ -885,6 +973,7 @@ func saveUploadedFile(w http.ResponseWriter, src io.Reader, originalName string)
 	if fi, err := os.Stat(destPath); err == nil {
 		cacheAdd(ImageInfo{
 			Filename:    safeName,
+			Path:        safeName, // uploads go to root; path == filename
 			ModTime:     bestDate(safeName, fi.ModTime()),
 			FileMtime:   fi.ModTime(),
 			Size:        fi.Size(),
@@ -899,6 +988,7 @@ func saveUploadedFile(w http.ResponseWriter, src io.Reader, originalName string)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"filename":    safeName,
+		"path":        safeName,
 		"thumbSmall":  small,
 		"thumbMedium": medium,
 		"original":    original,
@@ -940,12 +1030,12 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	filename := strings.TrimPrefix(r.URL.Path, "/api/delete/")
-	if !isValidFilename(filename) {
-		http.Error(w, "invalid filename", http.StatusBadRequest)
+	imgPath := strings.TrimPrefix(r.URL.Path, "/api/delete/")
+	if !isValidPath(imgPath) {
+		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
-	srcPath := filepath.Join(photosDir, filename)
+	srcPath := filepath.Join(photosDir, filepath.FromSlash(imgPath))
 
 	if err := os.Remove(srcPath); err != nil {
 		if os.IsNotExist(err) {
@@ -955,13 +1045,13 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	os.Remove(thumbSmallCachePath(filename))
-	os.Remove(thumbMediumCachePath(filename))
-	fileMu.Delete(filename)
+	os.Remove(thumbSmallCachePath(imgPath))
+	os.Remove(thumbMediumCachePath(imgPath))
+	fileMu.Delete(imgPath)
 	metaMu.Lock()
-	delete(metaIndex, filename)
+	delete(metaIndex, imgPath)
 	metaMu.Unlock()
-	cacheRemove(filename)
+	cacheRemove(imgPath)
 	saveMetaIndex()
 	log.Printf("delete: %s", srcPath)
 	w.WriteHeader(http.StatusNoContent)
@@ -1071,9 +1161,9 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	filename := strings.TrimPrefix(r.URL.Path, "/api/crop/")
-	if !isValidFilename(filename) {
-		http.Error(w, "invalid filename", http.StatusBadRequest)
+	imgPath := strings.TrimPrefix(r.URL.Path, "/api/crop/")
+	if !isValidPath(imgPath) {
+		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
 
@@ -1092,10 +1182,10 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	srcPath := filepath.Join(photosDir, filename)
+	srcPath := filepath.Join(photosDir, filepath.FromSlash(imgPath))
 
 	// Serialize all operations on this file through its per-file mutex.
-	rawMu, _ := fileMu.LoadOrStore(filename, &sync.Mutex{})
+	rawMu, _ := fileMu.LoadOrStore(imgPath, &sync.Mutex{})
 	mu := rawMu.(*sync.Mutex)
 	mu.Lock()
 	defer mu.Unlock()
@@ -1167,21 +1257,21 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Evict stale thumbnail caches and update metadata with new dimensions.
-	os.Remove(thumbSmallCachePath(filename))
-	os.Remove(thumbMediumCachePath(filename))
-	indexImage(filename, b.Dx(), b.Dy())
+	os.Remove(thumbSmallCachePath(imgPath))
+	os.Remove(thumbMediumCachePath(imgPath))
+	indexImage(imgPath, b.Dx(), b.Dy())
 	saveMetaIndex()
 
 	fi, statErr := os.Stat(srcPath)
-	small, medium, original := thumbURLs(filename)
+	small, medium, original := thumbURLs(imgPath)
 
 	imagesCacheMu.Lock()
 	for i, entry := range imagesCache {
-		if entry.Filename == filename {
+		if entry.Path == imgPath {
 			if statErr == nil {
 				imagesCache[i].Size = fi.Size()
 				imagesCache[i].FileMtime = fi.ModTime()
-				imagesCache[i].ModTime = bestDate(filename, fi.ModTime())
+				imagesCache[i].ModTime = bestDate(imgPath, fi.ModTime())
 			}
 			imagesCache[i].Width = b.Dx()
 			imagesCache[i].Height = b.Dy()
@@ -1194,11 +1284,12 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 	}
 	imagesCacheMu.Unlock()
 
-	log.Printf("crop: %s (%dx%d)", filename, b.Dx(), b.Dy())
+	log.Printf("crop: %s (%dx%d)", imgPath, b.Dx(), b.Dy())
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"filename":    filename,
+		"filename":    filepath.Base(imgPath),
+		"path":        imgPath,
 		"width":       b.Dx(),
 		"height":      b.Dy(),
 		"thumbSmall":  small,
@@ -1209,75 +1300,106 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 
 func warmupThumbnails() {
 	log.Println("warmup: cache pre-warming started")
-	defer log.Println("warmup: all thumbnails ready")
-	entries, err := os.ReadDir(photosDir)
-	if err != nil {
-		return
-	}
 
-	sem := make(chan struct{}, 4)
+	// Tighter GC target keeps peak heap lower when many large image buffers are
+	// live concurrently. Restored (with an OS-level free) once warmup finishes.
+	prev := debug.SetGCPercent(20)
+	defer func() {
+		debug.SetGCPercent(prev)
+		debug.FreeOSMemory()
+		log.Println("warmup: all thumbnails ready")
+	}()
+
+	// semFull bounds concurrent full-image decodes (each may hold tens of MB).
+	// semLight bounds header-only reads (DecodeConfig), which are cheap.
+	semFull := make(chan struct{}, 2)
+	semLight := make(chan struct{}, 8)
 	var wg sync.WaitGroup
 
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		ext := strings.ToLower(filepath.Ext(e.Name()))
-		if !supportedExts[ext] {
-			continue
-		}
-		name := e.Name()
-
-		fi, err := e.Info()
-		if err != nil {
-			continue
-		}
+	walkPhotosDir(func(imgPath string, fi os.FileInfo) {
 		fileMtime := fi.ModTime()
 
 		metaMu.RLock()
-		meta := metaIndex[name]
+		meta := metaIndex[imgPath]
 		metaMu.RUnlock()
 
 		mtimeChanged := !meta.FileMtime.Equal(fileMtime)
 		hasDims := meta.Width > 0
 
 		needsSmall := func() bool {
-			_, err := os.Stat(thumbSmallCachePath(name))
+			_, err := os.Stat(thumbSmallCachePath(imgPath))
 			return err != nil
 		}()
 		needsMedium := func() bool {
-			_, err := os.Stat(thumbMediumCachePath(name))
+			_, err := os.Stat(thumbMediumCachePath(imgPath))
 			return err != nil
 		}()
 
 		if hasDims && !needsSmall && !needsMedium && !mtimeChanged {
-			continue
+			return
+		}
+
+		// Thumbnails already on disk, mtime unchanged, only dims are missing
+		// (e.g. meta.json was cleared). Read just the image header instead of
+		// decoding megapixels into RAM.
+		if !needsSmall && !needsMedium && !mtimeChanged && !isVideo(imgPath) {
+			wg.Add(1)
+			semLight <- struct{}{}
+			go func(p string) {
+				defer wg.Done()
+				defer func() { <-semLight }()
+				srcPath := filepath.Join(photosDir, filepath.FromSlash(p))
+				f, err := os.Open(srcPath)
+				if err != nil {
+					return
+				}
+				defer f.Close()
+				cfg, _, err := image.DecodeConfig(f)
+				if err != nil {
+					indexImage(p, 0, 0)
+					return
+				}
+				w, h := cfg.Width, cfg.Height
+				// DecodeConfig ignores EXIF orientation; swap dims for 90°/270° images.
+				f.Seek(0, io.SeekStart) //nolint:errcheck
+				if x, err := exif.Decode(f); err == nil {
+					if tag, err := x.Get(exif.Orientation); err == nil {
+						if o, err := tag.Int(0); err == nil && o >= 5 && o <= 8 {
+							w, h = h, w
+						}
+					}
+				}
+				indexImage(p, w, h)
+			}(imgPath)
+			return
 		}
 
 		wg.Add(1)
-		sem <- struct{}{}
-		go func(filename string, genSmall, genMedium bool) {
+		semFull <- struct{}{}
+		go func(p string, genSmall, genMedium bool) {
 			defer wg.Done()
-			defer func() { <-sem }()
+			defer func() { <-semFull }()
 
-			srcPath := filepath.Join(photosDir, filename)
+			srcPath := filepath.Join(photosDir, filepath.FromSlash(p))
 			var img image.Image
 			var err error
-			if isVideo(filename) {
+			if isVideo(p) {
 				img, err = extractVideoFrame(srcPath)
 			} else {
 				img, err = imaging.Open(srcPath, imaging.AutoOrientation(true))
 			}
 			if err != nil {
-				log.Printf("warmup: open %s: %v", filename, err)
-				indexImage(filename, 0, 0)
+				log.Printf("warmup: open %s: %v", p, err)
+				indexImage(p, 0, 0)
 				return
 			}
 			b := img.Bounds()
-			indexImage(filename, b.Dx(), b.Dy()) // updates FileMtime in meta
+			indexImage(p, b.Dx(), b.Dy())
 			if genSmall {
 				thumb := imaging.Fit(img, thumbnailSize, thumbnailSize, imaging.Lanczos)
-				if f, err := os.Create(thumbSmallCachePath(filename)); err == nil {
+				cp := thumbSmallCachePath(p)
+				os.MkdirAll(filepath.Dir(cp), 0o755) //nolint:errcheck
+				if f, err := os.Create(cp); err == nil {
 					jpeg.Encode(f, thumb, &jpeg.Options{Quality: 85}) //nolint:errcheck
 					f.Close()
 				}
@@ -1289,38 +1411,41 @@ func warmupThumbnails() {
 				} else {
 					thumb = img
 				}
-				if f, err := os.Create(thumbMediumCachePath(filename)); err == nil {
+				img = nil
+				cp := thumbMediumCachePath(p)
+				os.MkdirAll(filepath.Dir(cp), 0o755) //nolint:errcheck
+				if f, err := os.Create(cp); err == nil {
 					jpeg.Encode(f, thumb, &jpeg.Options{Quality: 90}) //nolint:errcheck
 					f.Close()
 				}
+			} else {
+				img = nil
 			}
-		}(name, needsSmall || mtimeChanged, needsMedium || mtimeChanged)
-	}
+		}(imgPath, needsSmall || mtimeChanged, needsMedium || mtimeChanged)
+	})
 	wg.Wait()
 	saveMetaIndex()
-	// Rebuild cache after warmup to pick up newly discovered dimensions and URLs.
-	buildImagesCache()
 }
 
 // updateCachedFile refreshes in-memory state for a file that was created or
 // modified externally: evicts stale thumbnails, re-indexes, and updates
 // imagesCache. When addIfMissing is true the file is also added to the cache
 // if it was not already present (used for Create events).
-func updateCachedFile(filename string, fi os.FileInfo, addIfMissing bool) {
-	os.Remove(thumbSmallCachePath(filename))
-	os.Remove(thumbMediumCachePath(filename))
-	indexImage(filename, 0, 0)
+func updateCachedFile(imgPath string, fi os.FileInfo, addIfMissing bool) {
+	os.Remove(thumbSmallCachePath(imgPath))
+	os.Remove(thumbMediumCachePath(imgPath))
+	indexImage(imgPath, 0, 0)
 	saveMetaIndex()
-	small, medium, original := thumbURLs(filename)
+	small, medium, original := thumbURLs(imgPath)
 	metaMu.RLock()
-	meta := metaIndex[filename]
+	meta := metaIndex[imgPath]
 	metaMu.RUnlock()
 
 	imagesCacheMu.Lock()
 	found := false
 	for i, img := range imagesCache {
-		if img.Filename == filename {
-			imagesCache[i].ModTime = bestDate(filename, fi.ModTime())
+		if img.Path == imgPath {
+			imagesCache[i].ModTime = bestDate(imgPath, fi.ModTime())
 			imagesCache[i].FileMtime = fi.ModTime()
 			imagesCache[i].Size = fi.Size()
 			imagesCache[i].Width = meta.Width
@@ -1337,34 +1462,84 @@ func updateCachedFile(filename string, fi os.FileInfo, addIfMissing bool) {
 
 	if addIfMissing && !found {
 		cacheAdd(ImageInfo{
-			Filename:    filename,
-			ModTime:     bestDate(filename, fi.ModTime()),
+			Filename:    filepath.Base(imgPath),
+			Path:        imgPath,
+			ModTime:     bestDate(imgPath, fi.ModTime()),
 			FileMtime:   fi.ModTime(),
 			Size:        fi.Size(),
 			ThumbSmall:  small,
 			ThumbMedium: medium,
 			Original:    original,
 		})
-		log.Printf("watcher: added %s", filename)
+		log.Printf("watcher: added %s", imgPath)
 	} else {
-		log.Printf("watcher: updated %s", filename)
+		log.Printf("watcher: updated %s", imgPath)
 	}
 }
 
-// watchPhotosDir watches photosDir with fsnotify and keeps imagesCache and
-// metaIndex in sync when files are added, modified, or removed externally.
+// addWatchRecursive registers root and all its subdirectories with watcher.
+func addWatchRecursive(watcher *fsnotify.Watcher, root string) {
+	filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error { //nolint:errcheck
+		if err == nil && d.IsDir() {
+			if werr := watcher.Add(p); werr != nil {
+				log.Printf("watcher: failed to watch dir %s: %v", p, werr)
+			}
+		}
+		return nil
+	})
+}
+
+// indexNewlyArrivedDir walks a directory that just appeared (e.g. via rename/mv)
+// and indexes all supported files inside it. It runs in a background goroutine
+// with a 4-worker pool so the watcher event loop is not blocked and disk I/O
+// stays throttled when large trees arrive at once.
+func indexNewlyArrivedDir(dirPath string) {
+	safeGo("index-dir", func() {
+		log.Printf("index-dir: scanning %s", dirPath)
+		sem := make(chan struct{}, 4)
+		var wg sync.WaitGroup
+		filepath.WalkDir(dirPath, func(absPath string, d fs.DirEntry, err error) error { //nolint:errcheck
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			if !supportedExts[strings.ToLower(filepath.Ext(d.Name()))] {
+				return nil
+			}
+			fi, err := d.Info()
+			if err != nil {
+				return nil
+			}
+			rel, err := filepath.Rel(photosDir, absPath)
+			if err != nil {
+				return nil
+			}
+			imgPath := filepath.ToSlash(rel)
+			wg.Add(1)
+			sem <- struct{}{}
+			go func() {
+				defer wg.Done()
+				defer func() { <-sem }()
+				updateCachedFile(imgPath, fi, true)
+			}()
+			return nil
+		})
+		wg.Wait()
+		saveMetaIndex()
+		log.Printf("index-dir: completed %s", dirPath)
+	})
+}
+
+// watchPhotosDir watches photosDir and all subdirectories with fsnotify,
+// keeping imagesCache and metaIndex in sync when files are added, modified,
+// or removed externally.
 func watchPhotosDir() {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Printf("watcher: failed to create: %v", err)
 		return
 	}
-	if err := watcher.Add(photosDir); err != nil {
-		log.Printf("watcher: failed to watch %s: %v", photosDir, err)
-		watcher.Close()
-		return
-	}
-	log.Printf("watcher: watching %s", photosDir)
+	addWatchRecursive(watcher, photosDir)
+	log.Printf("watcher: watching %s (recursive)", photosDir)
 
 	go func() {
 		defer watcher.Close()
@@ -1380,8 +1555,24 @@ func watchPhotosDir() {
 							log.Printf("panic in watcher event handler: %v\n%s", rec, debug.Stack())
 						}
 					}()
-					filename := filepath.Base(event.Name)
-					ext := strings.ToLower(filepath.Ext(filename))
+
+					rel, err := filepath.Rel(photosDir, event.Name)
+					if err != nil {
+						return
+					}
+					imgPath := filepath.ToSlash(rel)
+
+					// Handle directory creation: start watching the new subtree.
+					if event.Has(fsnotify.Create) {
+						fi, statErr := os.Stat(event.Name)
+						if statErr == nil && fi.IsDir() {
+							addWatchRecursive(watcher, event.Name)
+							indexNewlyArrivedDir(event.Name)
+							return
+						}
+					}
+
+					ext := strings.ToLower(filepath.Ext(event.Name))
 					if !supportedExts[ext] {
 						return
 					}
@@ -1396,25 +1587,25 @@ func watchPhotosDir() {
 						}
 						// Do NOT delete metaIndex entry: indexImage preserves existing
 						// Width/Height when called with w=0, and detects mtime changes.
-						updateCachedFile(filename, fi, true)
+						updateCachedFile(imgPath, fi, true)
 
 					case event.Has(fsnotify.Write):
 						fi, err := os.Stat(event.Name)
 						if err != nil {
 							return
 						}
-						updateCachedFile(filename, fi, false)
+						updateCachedFile(imgPath, fi, false)
 
 					case event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename):
-						os.Remove(thumbSmallCachePath(filename))
-						os.Remove(thumbMediumCachePath(filename))
-						fileMu.Delete(filename)
+						os.Remove(thumbSmallCachePath(imgPath))
+						os.Remove(thumbMediumCachePath(imgPath))
+						fileMu.Delete(imgPath)
 						metaMu.Lock()
-						delete(metaIndex, filename)
+						delete(metaIndex, imgPath)
 						metaMu.Unlock()
-						cacheRemove(filename)
+						cacheRemove(imgPath)
 						saveMetaIndex()
-						log.Printf("watcher: removed %s", filename)
+						log.Printf("watcher: removed %s", imgPath)
 					}
 				}()
 
@@ -1436,24 +1627,10 @@ func watchPhotosDir() {
 func reconcile() {
 	log.Println("reconcile: starting nightly consistency check")
 
-	entries, err := os.ReadDir(photosDir)
-	if err != nil {
-		log.Printf("reconcile: cannot read photos dir: %v", err)
-		return
-	}
-
-	onDisk := make(map[string]os.FileInfo, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if !supportedExts[strings.ToLower(filepath.Ext(e.Name()))] {
-			continue
-		}
-		if fi, err := e.Info(); err == nil {
-			onDisk[e.Name()] = fi
-		}
-	}
+	onDisk := make(map[string]os.FileInfo, 256)
+	walkPhotosDir(func(imgPath string, fi os.FileInfo) {
+		onDisk[imgPath] = fi
+	})
 
 	changed := false
 
@@ -1462,44 +1639,45 @@ func reconcile() {
 	var stale []string
 	inCache := make(map[string]bool, len(imagesCache))
 	for _, img := range imagesCache {
-		if _, ok := onDisk[img.Filename]; ok {
-			inCache[img.Filename] = true
+		if _, ok := onDisk[img.Path]; ok {
+			inCache[img.Path] = true
 		} else {
-			stale = append(stale, img.Filename)
+			stale = append(stale, img.Path)
 		}
 	}
 	imagesCacheMu.RUnlock()
 
 	// Evict stale entries without holding imagesCacheMu across metaMu.
-	for _, name := range stale {
-		os.Remove(thumbSmallCachePath(name))
-		os.Remove(thumbMediumCachePath(name))
-		fileMu.Delete(name)
-		cacheRemove(name)
+	for _, imgPath := range stale {
+		os.Remove(thumbSmallCachePath(imgPath))
+		os.Remove(thumbMediumCachePath(imgPath))
+		fileMu.Delete(imgPath)
+		cacheRemove(imgPath)
 		metaMu.Lock()
-		delete(metaIndex, name)
+		delete(metaIndex, imgPath)
 		metaMu.Unlock()
-		log.Printf("reconcile: evicted stale entry %s", name)
+		log.Printf("reconcile: evicted stale entry %s", imgPath)
 		changed = true
 	}
 
 	// Add files on disk that are missing from the cache.
-	for name, fi := range onDisk {
-		if inCache[name] {
+	for imgPath, fi := range onDisk {
+		if inCache[imgPath] {
 			continue
 		}
-		indexImage(name, 0, 0)
-		small, medium, original := thumbURLs(name)
+		indexImage(imgPath, 0, 0)
+		small, medium, original := thumbURLs(imgPath)
 		cacheAdd(ImageInfo{
-			Filename:    name,
-			ModTime:     bestDate(name, fi.ModTime()),
+			Filename:    filepath.Base(imgPath),
+			Path:        imgPath,
+			ModTime:     bestDate(imgPath, fi.ModTime()),
 			FileMtime:   fi.ModTime(),
 			Size:        fi.Size(),
 			ThumbSmall:  small,
 			ThumbMedium: medium,
 			Original:    original,
 		})
-		log.Printf("reconcile: added missing file %s", name)
+		log.Printf("reconcile: added missing file %s", imgPath)
 		changed = true
 	}
 
@@ -1508,15 +1686,15 @@ func reconcile() {
 	// not blocked for the full scan.
 	metaMu.RLock()
 	var orphaned []string
-	for name := range metaIndex {
-		if _, ok := onDisk[name]; !ok {
-			orphaned = append(orphaned, name)
+	for imgPath := range metaIndex {
+		if _, ok := onDisk[imgPath]; !ok {
+			orphaned = append(orphaned, imgPath)
 		}
 	}
 	metaMu.RUnlock()
-	for _, name := range orphaned {
+	for _, imgPath := range orphaned {
 		metaMu.Lock()
-		delete(metaIndex, name)
+		delete(metaIndex, imgPath)
 		metaMu.Unlock()
 		changed = true
 	}
@@ -1747,6 +1925,15 @@ func main() {
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-quit
+		log.Println("Exiting...")
+		os.Exit(0)
+	}()
+
 	log.Fatal(srv.ListenAndServe())
 }
 

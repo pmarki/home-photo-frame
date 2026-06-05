@@ -1,10 +1,11 @@
-import { ref, computed, watch, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 
 const HIDE_DELAY_MS = 1500
 
 export function useYearScrollbar({ images, scrollY, rowHeight, columnCount, totalRows, viewportHeight }) {
   const visible = ref(false)
   let hideTimer = null
+  let maxRafId = null
 
   function getYear(img) {
     if (!img?.modTime) return null
@@ -25,9 +26,22 @@ export function useYearScrollbar({ images, scrollY, rowHeight, columnCount, tota
       .sort((a, b) => a.firstIdx - b.firstIdx)
   })
 
-  const maxScrollY = computed(() =>
-    Math.max(0, totalRows.value * rowHeight.value - viewportHeight.value)
-  )
+  // Use the actual document scroll height so the scrollbar reaches the true
+  // page bottom (which is larger than totalRows*rowHeight alone because of the
+  // header and wrapper padding above/below the grid).
+  const maxScrollY = ref(0)
+  function refreshMax() {
+    if (maxRafId) return
+    maxRafId = requestAnimationFrame(() => {
+      maxRafId = null
+      maxScrollY.value = Math.max(
+        0,
+        document.documentElement.scrollHeight - viewportHeight.value
+      )
+    })
+  }
+  watch([totalRows, rowHeight, viewportHeight], refreshMax)
+  onMounted(refreshMax)
 
   const yearItems = computed(() => {
     if (yearEntries.value.length < 2) return []
@@ -99,7 +113,10 @@ export function useYearScrollbar({ images, scrollY, rowHeight, columnCount, tota
     return max > 0 ? Math.min(1, scrollY.value / max) : 0
   })
 
-  onUnmounted(() => clearTimeout(hideTimer))
+  onUnmounted(() => {
+    clearTimeout(hideTimer)
+    if (maxRafId) cancelAnimationFrame(maxRafId)
+  })
 
   return { yearItems: displayItems, currentYear, visible, handlePos, maxScrollY }
 }

@@ -199,9 +199,9 @@ function onFilesSelected(e) {
   e.target.value = ''
   if (files.length === 0) return
 
-  const existingNames = new Set(images.value.map(img => img.filename))
-  const duplicates = files.filter(f => existingNames.has(f.name))
-  const unique = files.filter(f => !existingNames.has(f.name))
+  const existingPaths = new Set(images.value.map(img => img.path))
+  const duplicates = files.filter(f => existingPaths.has(f.name))
+  const unique = files.filter(f => !existingPaths.has(f.name))
 
   if (duplicates.length > 0) {
     const label = duplicates.length === 1
@@ -228,16 +228,16 @@ function onUploadDone(uploadedImages) {
   }
 }
 
-function onDeleted(filename) {
-  removeImage(filename)
+function onDeleted(path) {
+  removeImage(path)
   if (images.value.length === 0) {
     modalOpen.value = false
     if (history.state?.modal === 'lightbox') history.back()
   }
 }
 
-function onCropped(oldFilename, newImage) {
-  replaceImage(oldFilename, newImage)
+function onCropped(oldPath, newImage) {
+  replaceImage(oldPath, newImage)
 }
 
 function onShareDone(uploadedImages) {

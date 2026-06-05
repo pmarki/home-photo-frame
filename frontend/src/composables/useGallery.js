@@ -1,6 +1,6 @@
 import { ref, computed } from 'vue'
 
-const PAGE_LIMIT = 150
+const PAGE_LIMIT = 5000
 
 export function useGallery() {
   const images = ref([])
@@ -10,7 +10,7 @@ export function useGallery() {
   const error = ref(null)
   const sortBy = ref(localStorage.getItem('sortBy') || 'taken')
   const sortOrder = ref(localStorage.getItem('sortOrder') || 'desc')
-  let generation = 0 // incremented on every reset to cancel stale background loops
+  let generation = 0
 
   const hasMore = computed(
     () => currentPage.value === 0 || images.value.length < total.value
@@ -30,12 +30,11 @@ export function useGallery() {
         sort: sortBy.value,
         order: sortOrder.value,
         page: nextPage,
-        limit: PAGE_LIMIT
+        limit: PAGE_LIMIT,
       })
       const res = await fetch(`/api/images?${params}`)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
-      // Discard if a reset happened while we were fetching
       if (gen !== generation) return
       images.value = [...images.value, ...(data.images ?? [])]
       total.value = data.total ?? 0
@@ -58,16 +57,21 @@ export function useGallery() {
       }
       const pageBefore = currentPage.value
       await loadNextPage()
-      if (gen === generation && currentPage.value === pageBefore) break // fetch failed, stop
+      if (gen === generation && currentPage.value === pageBefore) break
     }
   }
 
-  function removeImage(filename) {
-    const idx = images.value.findIndex(img => img.filename === filename)
+  function removeImage(path) {
+    const idx = images.value.findIndex(img => img?.path === path)
     if (idx !== -1) {
       images.value.splice(idx, 1)
       total.value = Math.max(0, total.value - 1)
     }
+  }
+
+  function replaceImage(oldPath, newImage) {
+    const idx = images.value.findIndex(img => img?.path === oldPath)
+    if (idx !== -1) images.value.splice(idx, 1, newImage)
   }
 
   function resetState() {
@@ -85,11 +89,6 @@ export function useGallery() {
     localStorage.setItem('sortOrder', order)
     resetState()
     await loadNextPage()
-  }
-
-  function replaceImage(oldFilename, newImage) {
-    const idx = images.value.findIndex(img => img.filename === oldFilename)
-    if (idx !== -1) images.value.splice(idx, 1, newImage)
   }
 
   async function forceReload() {

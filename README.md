@@ -19,16 +19,20 @@ Drop images into a folder, get a fast infinite-scroll gallery with full-screen l
 
 ## Features
 
-- **Infinite scroll** — 150 images per page, prefetches before reaching the bottom
-- **Thumbnail cache** — JPEG thumbnails (400 px small, configurable medium) cached under `cache/s/` and `cache/m/` using the original filename; URL hash changes on file modification so browsers never show stale thumbnails or originals
-- **File watcher** — detects images added, edited, or removed externally (inotify) and keeps the in-memory index in sync without a restart
+- **Subfolder support** — photos can be organised in arbitrary subdirectories; each image is identified by its relative path (`vacation/2024/photo.jpg`), which is exposed in the API and displayed in the lightbox
+- **Virtual scroll** — only the rows currently visible (plus a small buffer) are rendered; spacer divs hold the total height so the scrollbar stays accurate across tens of thousands of images
+- **Lazy thumbnail loading** — thumbnails are requested 200 ms after they enter the viewport; scrolling away before the timer fires cancels the request entirely; images fade in on load so the broken-image icon never appears
+- **Thumbnail cache** — JPEG thumbnails (400 px small, configurable medium) cached under `cache/s/` and `cache/m/`, mirroring the source directory structure; URL hash changes on file modification so browsers never show stale thumbnails or originals
+- **Efficient warmup** — at startup, already-cached thumbnails use `image.DecodeConfig` (reads only the image header, ~1 KB) to recover stored dimensions instead of decoding the full image; full decodes are limited to 2 concurrent workers to bound peak memory; GC is tuned aggressively during warmup and heap is returned to the OS afterward
+- **File watcher** — detects images added, edited, or removed externally (inotify) and keeps the in-memory index in sync without a restart; watches subdirectories recursively and picks up newly created directories automatically
 - **Nightly reconcile** — runs at 03:00 local time to catch any drift between disk, in-memory cache, and metadata (handles missed watcher events, external deletions, etc.)
-- **Lightbox** — full-screen viewer, swipe/keyboard navigation, slide transitions
+- **Lightbox** — full-screen viewer with slide transitions; double-click or double-tap to zoom to 2× centred on the tap point; drag to pan while zoomed; swipe-to-navigate disabled while zoomed
+- **Lightbox footer** — shows the relative file path (e.g. `vacation/2024/photo.jpg`); click/tap to copy to clipboard
 - **In-app crop** — drag-to-select crop UI; saves a new file, deletes the original
 - **Delete** — two-tap confirmation in the lightbox
 - **Upload** — drag-and-drop or file picker with per-file progress bar; chunked (1.5 MB/chunk) so uploads survive slow connections and proxy read-timeouts; 500 MB per-file cap enforced server-side; retry button for failed files; optional post-upload crop queue
 - **Year scrollbar** — Google Photos-style overlay on the right edge: year markers fade in while scrolling (highlighted for the current year), with a touch-draggable 3-D handle for jumping directly to any year; hidden on mouse/desktop (labels only), touch-only on mobile
-- **Sort** — by filename or photo date (EXIF → filename pattern → mtime), ascending or descending; persisted to localStorage
+- **Sort** — by filename, photo date (EXIF → filename pattern → mtime), or modification time, ascending or descending; persisted to localStorage
 - **Share original** — Web Share API (file blob) on mobile; download fallback on desktop
 - **Android share target** — share photos *into* the app from any Android app; the service worker intercepts the POST, stores files in the Cache API, the app shows per-file upload progress
 - **PWA** — installable, offline shell via Workbox precaching; `/api/config` (title, colours) is cached by the service worker and in `localStorage` so the app loads with the correct theme instantly, even offline
@@ -54,8 +58,14 @@ make setup          # installs Go, npm deps, generates icons
 photos/
 ├── IMG_0001.jpg
 ├── 20240318_132033_holiday.jpg   ← filename date used when no EXIF
+├── vacation/
+│   ├── IMG_0042.jpg
+│   └── beach/
+│       └── DSC_1234.jpg
 └── ...
 ```
+
+Subdirectories are indexed recursively. The relative path (e.g. `vacation/beach/DSC_1234.jpg`) is used as the stable identity for each image across all APIs.
 
 Supported image formats: **JPEG, PNG, GIF, WebP**
 
@@ -179,15 +189,17 @@ Open **http://localhost:5173** — Vite proxies `/api` requests to the Go backen
 |---|---|---|
 | `GET` | `/api/images` | Paginated image list (see below) |
 | `GET` | `/api/config` | Runtime config: `{"title": "..."}` |
-| `GET` | `/api/thumb/{hash}/{filename}` | 400 px thumbnail (JPEG, content-addressed, 1-year cache) |
-| `GET` | `/api/thumb-medium/{hash}/{filename}` | Medium thumbnail up to `MEDIUM_WIDTH` px wide |
-| `GET` | `/api/original/{hash}/{filename}` | Original unmodified file (1-year immutable cache); falls back to `/api/original/{filename}` with 1-hour cache for backward compat |
+| `GET` | `/api/thumb/{hash}/{path}` | 400 px thumbnail (JPEG, content-addressed, 1-year cache) |
+| `GET` | `/api/thumb-medium/{hash}/{path}` | Medium thumbnail up to `MEDIUM_WIDTH` px wide |
+| `GET` | `/api/original/{hash}/{path}` | Original unmodified file (1-year immutable cache); falls back to `/api/original/{path}` with 1-hour cache for backward compat |
 | `POST` | `/api/upload` | Upload an image — single-file or chunked (see below) |
-| `POST` | `/api/crop/{filename}` | Crop image. Body: `{"x","y","width","height"}` in pixels |
-| `DELETE` | `/api/delete/{filename}` | Delete image and its thumbnail cache |
+| `POST` | `/api/crop/{path}` | Crop image. Body: `{"x","y","width","height"}` in pixels |
+| `DELETE` | `/api/delete/{path}` | Delete image and its thumbnail cache |
 | `GET/POST` | `/manifest.webmanifest` | PWA manifest with `name`/`short_name` injected from `-title` |
 
-Thumbnail and original URLs are content-addressed: the hash component encodes the source filename and OS mtime. When a file is modified externally the hash changes, so browsers automatically fetch fresh content while old responses remain permanently cacheable.
+`{path}` is the relative path from the photos directory, e.g. `vacation/beach/photo.jpg` or just `photo.jpg` for root-level files. Each path component is percent-encoded separately so slashes remain real URL separators.
+
+Thumbnail and original URLs are content-addressed: the hash component encodes the source path and OS mtime. When a file is modified externally the hash changes, so browsers automatically fetch fresh content while old responses remain permanently cacheable.
 
 ### GET /api/images
 
@@ -197,9 +209,9 @@ Returns a sorted list of all images (or a paginated page when `limit` is supplie
 
 | Parameter | Values | Default | Description |
 |---|---|---|---|
-| `sort` | `taken` \| `mtime` \| `name` | `taken` | Sort field. `taken` uses EXIF DateTimeOriginal → filename pattern `YYYYMMDD_HHMMSS` → file mtime. `mtime` sorts by OS modification time (useful to see recently added files first) |
+| `sort` | `taken` \| `mtime` \| `name` | `taken` | Sort field. `taken` uses EXIF DateTimeOriginal → filename pattern `YYYYMMDD_HHMMSS` → file mtime. `mtime` sorts by OS modification time (useful to see recently added files first). `name` sorts by full relative path |
 | `order` | `asc` \| `desc` | `desc` | Sort direction |
-| `limit` | 1–200 | *(omit for all)* | Images per page. When omitted all images are returned in one response |
+| `limit` | 1–10 000 | *(omit for all)* | Images per page. When omitted all images are returned in one response. The built-in frontend requests 5 000 per page |
 | `page` | integer ≥ 1 | `1` | Page number (1-based); only meaningful when `limit` is set |
 
 **Example requests**
