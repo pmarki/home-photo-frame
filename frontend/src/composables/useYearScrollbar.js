@@ -12,18 +12,54 @@ export function useYearScrollbar({ images, scrollY, rowHeight, columnCount, tota
     return new Date(img.modTime).getFullYear()
   }
 
-  const yearEntries = computed(() => {
-    const seen = new Map()
-    const imgs = images.value
-    for (let i = 0; i < imgs.length; i++) {
+  // Shape-based cache: the images array is sorted, so (length, first, last)
+  // identity is a stable proxy for content. Page loads grow the tail and take
+  // the append-only path; crop's replaceImage keeps endpoints stable and hits
+  // the cache; anything else (sort change, remove, initial fill) rebuilds.
+  let cachedShape = null
+  let cachedYearMap = new Map()
+  let cachedResult = []
+
+  function extendYearMap(imgs, fromIdx) {
+    for (let i = fromIdx; i < imgs.length; i++) {
       const img = imgs[i]
       if (!img) continue
       const year = getYear(img)
-      if (year != null && !seen.has(year)) seen.set(year, i)
+      if (year != null && !cachedYearMap.has(year)) cachedYearMap.set(year, i)
     }
-    return Array.from(seen.entries())
+  }
+
+  function serialiseYearMap() {
+    return Array.from(cachedYearMap.entries())
       .map(([year, firstIdx]) => ({ year, firstIdx }))
       .sort((a, b) => a.firstIdx - b.firstIdx)
+  }
+
+  const yearEntries = computed(() => {
+    const imgs = images.value
+    const len = imgs.length
+    const first = imgs[0]
+    const last = imgs[len - 1]
+
+    if (
+      cachedShape &&
+      cachedShape.len === len &&
+      cachedShape.first === first &&
+      cachedShape.last === last
+    ) {
+      return cachedResult
+    }
+
+    if (cachedShape && cachedShape.first === first && len > cachedShape.len) {
+      extendYearMap(imgs, cachedShape.len)
+    } else {
+      cachedYearMap = new Map()
+      extendYearMap(imgs, 0)
+    }
+
+    cachedShape = { len, first, last }
+    cachedResult = serialiseYearMap()
+    return cachedResult
   })
 
   // Use the actual document scroll height so the scrollbar reaches the true

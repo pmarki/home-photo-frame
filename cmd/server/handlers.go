@@ -71,19 +71,18 @@ func handleImages(w http.ResponseWriter, r *http.Request) {
 func handleOriginal(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/original/")
 	slash := strings.IndexByte(rest, '/')
-	var imgPath, cacheControl string
+	var urlHash, imgPath string
 	if slash < 0 {
 		imgPath = rest
-		cacheControl = "public, max-age=3600"
 	} else {
+		urlHash = rest[:slash]
 		imgPath = rest[slash+1:]
-		cacheControl = "public, max-age=31536000, immutable"
 	}
 	if !isValidPath(imgPath) {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
-	w.Header().Set("Cache-Control", cacheControl)
+	w.Header().Set("Cache-Control", cacheControlForHashedURL(imgPath, urlHash))
 	http.ServeFile(w, r, filepath.Join(photosDir, filepath.FromSlash(imgPath)))
 }
 

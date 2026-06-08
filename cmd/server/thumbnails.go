@@ -33,6 +33,22 @@ func thumbHash(filename string, mtime time.Time) string {
 	return hex.EncodeToString(h[:8])
 }
 
+// cacheControlForHashedURL returns the immutable cache header when urlHash
+// matches the current (path, mtime) hash for imgPath. On mismatch (a stale
+// shared URL after a crop / re-upload), or when the source can't be stat'd,
+// it returns a short cache so the recipient's browser doesn't pin outdated
+// bytes for a year.
+func cacheControlForHashedURL(imgPath, urlHash string) string {
+	if urlHash == "" {
+		return "public, max-age=3600"
+	}
+	srcPath := filepath.Join(photosDir, filepath.FromSlash(imgPath))
+	if fi, err := os.Stat(srcPath); err == nil && thumbHash(imgPath, fi.ModTime()) == urlHash {
+		return "public, max-age=31536000, immutable"
+	}
+	return "public, max-age=3600"
+}
+
 func thumbSmallCachePath(imgPath string) string {
 	return filepath.Join(cacheDir, "s", filepath.FromSlash(imgPath))
 }
@@ -67,12 +83,6 @@ func parseThumbPath(prefix, fullPath string) (hash, imgPath string, ok bool) {
 	return
 }
 
-func serveImmutable(w http.ResponseWriter, r *http.Request, cachePath string) {
-	w.Header().Set("Content-Type", "image/jpeg")
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	http.ServeFile(w, r, cachePath)
-}
-
 // serveCachedThumb is the shared implementation for small and medium thumbnail
 // handlers. All sizes and crop share the same per-filename mutex so a crop
 // cannot race with a concurrent thumbnail write for the same file.
@@ -83,15 +93,18 @@ func serveCachedThumb(
 	transform func(image.Image) image.Image,
 	quality int,
 ) {
-	_, imgPath, ok := parseThumbPath(prefix, r.URL.Path)
+	urlHash, imgPath, ok := parseThumbPath(prefix, r.URL.Path)
 	if !ok {
 		http.Error(w, "invalid", http.StatusBadRequest)
 		return
 	}
 	cp := cachePath(imgPath)
+	cc := cacheControlForHashedURL(imgPath, urlHash)
 
 	if _, err := os.Stat(cp); err == nil {
-		serveImmutable(w, r, cp)
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Cache-Control", cc)
+		http.ServeFile(w, r, cp)
 		return
 	}
 
@@ -107,7 +120,9 @@ func serveCachedThumb(
 	defer mu.Unlock()
 
 	if _, err := os.Stat(cp); err == nil {
-		serveImmutable(w, r, cp)
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Cache-Control", cc)
+		http.ServeFile(w, r, cp)
 		return
 	}
 
@@ -143,7 +158,7 @@ func serveCachedThumb(
 	indexFileRecord(imgPath, b.Dx(), b.Dy())
 
 	w.Header().Set("Content-Type", "image/jpeg")
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("Cache-Control", cc)
 	w.Write(data) //nolint:errcheck
 }
 

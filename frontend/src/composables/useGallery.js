@@ -11,6 +11,7 @@ export function useGallery() {
   const sortBy = ref(localStorage.getItem('sortBy') || 'taken')
   const sortOrder = ref(localStorage.getItem('sortOrder') || 'desc')
   let generation = 0
+  let currentController = null
 
   const hasMore = computed(
     () => currentPage.value === 0 || images.value.length < total.value
@@ -24,6 +25,8 @@ export function useGallery() {
     error.value = null
     const isFirstPage = currentPage.value === 0
     const gen = generation
+    const controller = new AbortController()
+    currentController = controller
     try {
       const nextPage = currentPage.value + 1
       const params = new URLSearchParams({
@@ -32,7 +35,7 @@ export function useGallery() {
         page: nextPage,
         limit: PAGE_LIMIT,
       })
-      const res = await fetch(`/api/images?${params}`)
+      const res = await fetch(`/api/images?${params}`, { signal: controller.signal })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       if (gen !== generation) return
@@ -40,10 +43,17 @@ export function useGallery() {
       total.value = data.total ?? 0
       currentPage.value = nextPage
     } catch (e) {
+      if (e.name === 'AbortError') return
       if (gen === generation) error.value = e.message
       return
     } finally {
-      loading.value = false
+      // Only THIS fetch's controller may toggle shared state. If resetState
+      // aborted us (controller swapped to null) or a successor fetch has
+      // already taken over, leave its state alone.
+      if (currentController === controller) {
+        loading.value = false
+        currentController = null
+      }
     }
 
     if (isFirstPage && hasMore.value) loadRemainingPages(gen)
@@ -76,6 +86,11 @@ export function useGallery() {
 
   function resetState() {
     generation++
+    currentController?.abort()
+    currentController = null
+    // Clear loading so the immediate awaited loadNextPage() from setSort /
+    // forceReload doesn't bail on its `if (loading.value) return` guard.
+    loading.value = false
     images.value = []
     total.value = 0
     currentPage.value = 0
