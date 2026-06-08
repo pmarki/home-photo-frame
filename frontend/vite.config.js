@@ -13,6 +13,7 @@ export default defineConfig({
       filename: 'sw.js',
 
       registerType: 'autoUpdate',
+      injectRegister: false,
       includeAssets: ['icons/icon-192.png', 'icons/icon-512.png'],
 
       injectManifest: {

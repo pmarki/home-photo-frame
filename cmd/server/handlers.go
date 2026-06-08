@@ -540,8 +540,12 @@ func spaHandler(fsys fs.FS) http.Handler {
 	fileServer := http.FileServer(http.FS(fsys))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := strings.TrimPrefix(r.URL.Path, "/")
-		if p == "" || p == "index.html" || p == "sw.js" {
+		switch {
+		case p == "" || p == "index.html" || p == "sw.js":
 			w.Header().Set("Cache-Control", "no-cache")
+		case strings.HasPrefix(p, "assets/"):
+			// Vite emits content-hashed filenames under assets/; safe to cache forever.
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		}
 		f, err := fsys.Open(p)
 		if err == nil {

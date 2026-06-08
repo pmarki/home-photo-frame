@@ -2,14 +2,25 @@ import { ref, computed } from 'vue'
 
 const PAGE_LIMIT = 5000
 
+const MODE_SORT = {
+  gallery:  { sortBy: 'taken', sortOrder: 'desc' },
+  timeline: { sortBy: 'mtime', sortOrder: 'desc' },
+  browser:  { sortBy: 'name',  sortOrder: 'asc'  },
+}
+
+function normalizeMode(m) {
+  return MODE_SORT[m] ? m : 'gallery'
+}
+
 export function useGallery() {
   const images = ref([])
   const total = ref(0)
   const currentPage = ref(0)
   const loading = ref(false)
   const error = ref(null)
-  const sortBy = ref(localStorage.getItem('sortBy') || 'taken')
-  const sortOrder = ref(localStorage.getItem('sortOrder') || 'desc')
+  const viewMode = ref(normalizeMode(localStorage.getItem('viewMode')))
+  const sortBy = ref(MODE_SORT[viewMode.value].sortBy)
+  const sortOrder = ref(MODE_SORT[viewMode.value].sortOrder)
   let generation = 0
   let currentController = null
 
@@ -88,7 +99,7 @@ export function useGallery() {
     generation++
     currentController?.abort()
     currentController = null
-    // Clear loading so the immediate awaited loadNextPage() from setSort /
+    // Clear loading so the immediate awaited loadNextPage() from setViewMode /
     // forceReload doesn't bail on its `if (loading.value) return` guard.
     loading.value = false
     images.value = []
@@ -96,12 +107,14 @@ export function useGallery() {
     currentPage.value = 0
   }
 
-  async function setSort(by, order) {
-    if (sortBy.value === by && sortOrder.value === order) return
-    sortBy.value = by
-    sortOrder.value = order
-    localStorage.setItem('sortBy', by)
-    localStorage.setItem('sortOrder', order)
+  async function setViewMode(mode) {
+    const target = normalizeMode(mode)
+    if (viewMode.value === target) return
+    viewMode.value = target
+    localStorage.setItem('viewMode', target)
+    const { sortBy: sb, sortOrder: so } = MODE_SORT[target]
+    sortBy.value = sb
+    sortOrder.value = so
     resetState()
     await loadNextPage()
   }
@@ -117,10 +130,9 @@ export function useGallery() {
     loading,
     error,
     hasMore,
-    sortBy,
-    sortOrder,
+    viewMode,
     loadNextPage,
-    setSort,
+    setViewMode,
     removeImage,
     replaceImage,
     forceReload,

@@ -19,6 +19,7 @@ export function useVirtualScroll({ images, total, containerRef }) {
   const columnCount = ref(cols)
   const itemSize = ref(itemPx)
   const gap = ref(gapPx)
+  const rowHeightOverride = ref(0)
   const scrollY = ref(typeof window !== 'undefined' ? window.scrollY : 0)
   const viewportHeight = ref(typeof window !== 'undefined' ? window.innerHeight : 800)
 
@@ -36,6 +37,9 @@ export function useVirtualScroll({ images, total, containerRef }) {
     }
     const g = parseFloat(style.gap || style.rowGap || '0')
     if (!isNaN(g)) gap.value = g
+
+    const explicitRowH = parseFloat(style.getPropertyValue('--vs-row-h'))
+    rowHeightOverride.value = isNaN(explicitRowH) ? 0 : explicitRowH
   }
 
   function onScroll() {
@@ -75,7 +79,9 @@ export function useVirtualScroll({ images, total, containerRef }) {
     }
   })
 
-  const rowHeight = computed(() => itemSize.value + gap.value)
+  const rowHeight = computed(() =>
+    rowHeightOverride.value > 0 ? rowHeightOverride.value : itemSize.value + gap.value
+  )
 
   const totalRows = computed(() => {
     if (columnCount.value < 1 || total.value < 1) return 0
@@ -116,6 +122,10 @@ export function useVirtualScroll({ images, total, containerRef }) {
     return result
   })
 
+  function refreshMetrics() {
+    requestAnimationFrame(readGridMetrics)
+  }
+
   return {
     topSpacer,
     bottomSpacer,
@@ -126,5 +136,6 @@ export function useVirtualScroll({ images, total, containerRef }) {
     totalRows,
     scrollY,
     viewportHeight,
+    refreshMetrics,
   }
 }

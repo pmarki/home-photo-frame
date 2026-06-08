@@ -16,29 +16,7 @@
         {{ appTitle }}
       </h1>
 
-      <div class="sort-controls" ref="sortRef">
-        <button class="sort-icon-btn" @click="sortOpen = !sortOpen" :class="{ active: sortOpen }" title="Sort">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <line x1="4" y1="6" x2="20" y2="6"/>
-            <line x1="4" y1="12" x2="14" y2="12"/>
-            <line x1="4" y1="18" x2="9" y2="18"/>
-          </svg>
-        </button>
-        <div v-if="sortOpen" class="sort-dropdown">
-          <button
-            v-for="opt in sortOptions"
-            :key="opt.key"
-            :class="['sort-option', { active: sortBy === opt.sortBy && sortOrder === opt.order }]"
-            @click="setSort(opt.sortBy, opt.order); sortOpen = false"
-          >
-            {{ opt.label }}
-          </button>
-        </div>
-      </div>
-
-      <div class="header-count" v-if="total > 0">
-        {{ images.length }}&thinsp;/&thinsp;{{ total }}
-      </div>
+      <ViewModeToggle :mode="viewMode" @change="setViewMode" />
 
       <button class="upload-icon-btn" title="Upload photos" @click="fileInput.click()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -62,6 +40,7 @@
         :images="images"
         :total="total"
         :loading="loading"
+        :viewMode="viewMode"
         @open="openModal"
       />
 
@@ -111,9 +90,10 @@ import LightboxModal from './components/LightboxModal.vue'
 import ShareUploader from './components/ShareUploader.vue'
 import UploadDialog from './components/UploadDialog.vue'
 import PostUploadCropQueue from './components/PostUploadCropQueue.vue'
+import ViewModeToggle from './components/ViewModeToggle.vue'
 import { useGallery } from './composables/useGallery.js'
 
-const { images, total, loading, error, hasMore, sortBy, sortOrder, loadNextPage, setSort, removeImage, replaceImage, forceReload } = useGallery()
+const { images, total, loading, error, hasMore, viewMode, loadNextPage, setViewMode, removeImage, replaceImage, forceReload } = useGallery()
 
 const modalOpen = ref(false)
 const modalIndex = ref(0)
@@ -123,7 +103,6 @@ const cropQueue = ref(null)  // [{filename}] — shown after upload when non-nul
 let savedScrollY = 0         // gallery scroll position saved when lightbox opens
 const lightboxRef = ref(null)
 const fileInput = ref(null)
-const sortOpen = ref(false)
 const toasts = ref([])
 let toastSeq = 0
 const _storedCfg = (() => { try { return JSON.parse(localStorage.getItem('app-config') || 'null') } catch { return null } })()
@@ -131,21 +110,7 @@ const videoEnabled = ref(_storedCfg?.videoEnabled ?? false)
 const titleIcon = ref(_storedCfg?.titleIcon ?? false)
 
 const isVideo = (filename) => /\.(mp4|webm|mov|m4v)$/i.test(filename ?? '')
-const sortRef = ref(null)
 const appTitle = ref(_storedCfg?.title || 'Photo Frame')
-
-function onClickOutside(e) {
-  if (sortRef.value && !sortRef.value.contains(e.target)) sortOpen.value = false
-}
-
-const sortOptions = [
-  { key: 'taken-desc',  label: 'Date taken ↓',     sortBy: 'taken', order: 'desc' },
-  { key: 'taken-asc',   label: 'Date taken ↑',     sortBy: 'taken', order: 'asc'  },
-  { key: 'mtime-desc',  label: 'Date modified ↓',  sortBy: 'mtime', order: 'desc' },
-  { key: 'mtime-asc',   label: 'Date modified ↑',  sortBy: 'mtime', order: 'asc'  },
-  { key: 'name-asc',    label: 'Name ↑',           sortBy: 'name',  order: 'asc'  },
-  { key: 'name-desc',   label: 'Name ↓',           sortBy: 'name',  order: 'desc' },
-]
 
 function openModal(index) {
   savedScrollY = window.scrollY
@@ -276,7 +241,6 @@ onMounted(() => {
     })
     .catch(() => {})
 
-  document.addEventListener('click', onClickOutside, true)
   const url = new URL(window.location.href)
   if (url.searchParams.has('share-pending')) {
     shareUploaderVisible.value = true
@@ -287,7 +251,6 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  document.removeEventListener('click', onClickOutside, true)
   window.removeEventListener('popstate', onPopState)
 })
 </script>
@@ -347,11 +310,6 @@ body {
   opacity: 0.8;
 }
 
-.sort-controls {
-  position: relative;
-  flex: 1;
-}
-
 .sort-icon-btn {
   display: flex;
   align-items: center;
@@ -368,44 +326,6 @@ body {
 .sort-icon-btn svg { width: 18px; height: 18px; }
 .sort-icon-btn:hover { border-color: rgba(255,255,255,0.25); color: #ccc; }
 .sort-icon-btn.active { border-color: rgba(100,120,220,0.6); color: #c0caff; background: rgba(100,120,220,0.15); }
-
-.sort-dropdown {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 200;
-  background: #16161f;
-  border: 1px solid rgba(255,255,255,0.1);
-  border-radius: 10px;
-  padding: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 130px;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
-}
-
-.sort-option {
-  padding: 7px 14px;
-  border-radius: 6px;
-  border: none;
-  background: transparent;
-  color: #aaa;
-  font-size: 0.85rem;
-  cursor: pointer;
-  text-align: left;
-  transition: all 0.1s;
-  white-space: nowrap;
-}
-.sort-option:hover { background: rgba(255,255,255,0.06); color: #ddd; }
-.sort-option.active { background: rgba(100,120,220,0.2); color: #c0caff; }
-
-.header-count {
-  font-size: 0.78rem;
-  color: #444;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
 
 .upload-icon-btn {
   display: flex;

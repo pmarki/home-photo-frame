@@ -10,7 +10,7 @@
     </div>
 
     <!-- Grid -->
-    <div v-else ref="gridContainer" class="gallery-grid" role="list">
+    <div v-else ref="gridContainer" class="gallery-grid" :class="`mode-${viewMode}`" role="list">
       <!-- Top spacer: occupies height of off-screen rows above viewport -->
       <div
         v-if="topSpacer > 0"
@@ -50,6 +50,7 @@
           <div class="gallery-overlay" aria-hidden="true">
             <span class="gallery-name">{{ img.filename }}</span>
           </div>
+          <span class="gallery-filename" aria-hidden="true">{{ img.filename }}</span>
           <div
             v-if="img.width && img.height && !loadingSet.has(img.thumbSmall) && !errorSet.has(img.thumbSmall)"
             class="orientation-badge"
@@ -76,6 +77,7 @@
   </div>
 
   <YearScrollbar
+    v-if="viewMode === 'gallery'"
     :yearItems="yearItems"
     :currentYear="currentYear"
     :visible="yearVisible"
@@ -85,16 +87,17 @@
 </template>
 
 <script setup>
-import { ref, toRef, reactive } from 'vue'
+import { ref, toRef, reactive, watch } from 'vue'
 import GalleryPlaceholder from './GalleryPlaceholder.vue'
 import YearScrollbar from './YearScrollbar.vue'
 import { useVirtualScroll } from '../composables/useVirtualScroll.js'
 import { useYearScrollbar } from '../composables/useYearScrollbar.js'
 
 const props = defineProps({
-  images:  { type: Array,   required: true },
-  total:   { type: Number,  default: 0 },
-  loading: { type: Boolean, default: false },
+  images:   { type: Array,   required: true },
+  total:    { type: Number,  default: 0 },
+  loading:  { type: Boolean, default: false },
+  viewMode: { type: String,  default: 'gallery' },
 })
 
 const emit = defineEmits(['open'])
@@ -102,11 +105,13 @@ const emit = defineEmits(['open'])
 const gridContainer = ref(null)
 const imagesRef = toRef(props, 'images')
 
-const { topSpacer, bottomSpacer, visibleItems, startIdx, columnCount, rowHeight, totalRows, scrollY, viewportHeight } = useVirtualScroll({
+const { topSpacer, bottomSpacer, visibleItems, startIdx, columnCount, rowHeight, totalRows, scrollY, viewportHeight, refreshMetrics } = useVirtualScroll({
   images: imagesRef,
   total:  toRef(props, 'total'),
   containerRef: gridContainer,
 })
+
+watch(() => props.viewMode, () => refreshMetrics())
 
 const { yearItems, currentYear, visible: yearVisible, handlePos, maxScrollY } = useYearScrollbar({
   images: imagesRef,
@@ -302,6 +307,85 @@ function imgOrientation(img) {
   word-break: break-all;
   line-height: 1.3;
 }
+
+/* Persistent caption span — only rendered (display) in Browser mode. */
+.gallery-filename { display: none; }
+
+/* ─── Timeline mode: always-visible filename overlay ────────────────── */
+.mode-timeline .gallery-overlay {
+  opacity: 1;
+  background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.55) 35%, transparent 70%);
+}
+.mode-timeline .gallery-name {
+  display: block;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: normal;
+}
+
+/* ─── Browser mode: single-column file-browser-like rows ────────────── */
+.mode-browser {
+  grid-template-columns: 1fr;
+  gap: 1px;
+  --vs-row-h: 57px;
+}
+@media (min-width: 480px)  { .mode-browser { grid-template-columns: 1fr; gap: 1px; } }
+@media (min-width: 768px)  { .mode-browser { grid-template-columns: 1fr; gap: 1px; } }
+@media (min-width: 1280px) { .mode-browser { grid-template-columns: 1fr; gap: 1px; } }
+@media (min-width: 1800px) { .mode-browser { grid-template-columns: 1fr; } }
+
+.mode-browser .gallery-item {
+  aspect-ratio: auto;
+  height: 56px;
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  align-items: center;
+  gap: 12px;
+  border-radius: 4px;
+  background: transparent;
+  overflow: hidden;
+}
+.mode-browser .gallery-item:hover { background: rgba(255,255,255,0.04); }
+
+.mode-browser .gallery-thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  transform: none !important;
+  border-radius: 3px;
+}
+
+.mode-browser .gallery-overlay,
+.mode-browser .orientation-badge { display: none; }
+
+.mode-browser .video-badge {
+  top: 4px;
+  left: 4px;
+  width: 20px;
+  height: 20px;
+  font-size: 0.55rem;
+}
+
+.mode-browser .gallery-filename {
+  display: block;
+  padding-right: 12px;
+  font-size: 0.85rem;
+  color: #ddd;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+
+.mode-browser .img-loader,
+.mode-browser .img-broken {
+  right: auto;
+  width: 56px;
+  height: 56px;
+}
+.mode-browser .img-broken svg { width: 24px; height: 24px; }
 
 /* ─── Loading ───────────────────────────────────────────────────────── */
 .gallery-loading {
