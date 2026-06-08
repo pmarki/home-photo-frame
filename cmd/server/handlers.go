@@ -204,6 +204,13 @@ func saveUploadedFile(w http.ResponseWriter, src io.Reader, originalName string)
 	}
 	destPath := filepath.Join(photosDir, safeName)
 
+	// Hold the per-file mutex across the write + inline thumb + index so a
+	// concurrent thumbnail request can't open a half-written file.
+	rawMu, _ := fileMu.LoadOrStore(safeName, &sync.Mutex{})
+	mu := rawMu.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
 	dst, ferr := os.OpenFile(destPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if ferr != nil {
 		if os.IsExist(ferr) {
@@ -417,25 +424,16 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 	os.Remove(thumbMediumCachePath(imgPath))
 	indexFileRecord(imgPath, b.Dx(), b.Dy())
 
-	fi, statErr := os.Stat(srcPath)
-	if statErr != nil {
-		http.Error(w, "failed to stat cropped file", http.StatusInternalServerError)
+	info, err := lookupFile(imgPath)
+	if err != nil {
+		http.Error(w, "failed to load cropped record", http.StatusInternalServerError)
 		return
 	}
-	small, medium, original := thumbURLs(imgPath, fi.ModTime())
 
 	log.Printf("crop: %s (%dx%d)", imgPath, b.Dx(), b.Dy())
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-		"filename":    filepath.Base(imgPath),
-		"path":        imgPath,
-		"width":       b.Dx(),
-		"height":      b.Dy(),
-		"thumbSmall":  small,
-		"thumbMedium": medium,
-		"original":    original,
-	})
+	json.NewEncoder(w).Encode(info) //nolint:errcheck
 }
 
 func handleConfig(w http.ResponseWriter, r *http.Request) {

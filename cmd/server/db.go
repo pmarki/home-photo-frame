@@ -109,6 +109,37 @@ func deleteFile(imgPath string) {
 	}
 }
 
+// lookupFile loads a single ImageInfo by path. Returns sql.ErrNoRows if the
+// record is missing.
+func lookupFile(imgPath string) (ImageInfo, error) {
+	var (
+		filename                    string
+		mtimeNs, dateTakenNs, size  int64
+		w, h                        int
+	)
+	err := db.QueryRow(
+		`SELECT filename, file_mtime, date_taken, size, width, height
+		   FROM files WHERE path = ?`, imgPath,
+	).Scan(&filename, &mtimeNs, &dateTakenNs, &size, &w, &h)
+	if err != nil {
+		return ImageInfo{}, err
+	}
+	mtime := time.Unix(0, mtimeNs)
+	small, medium, original := thumbURLs(imgPath, mtime)
+	return ImageInfo{
+		Filename:    filename,
+		Path:        imgPath,
+		ModTime:     time.Unix(0, dateTakenNs),
+		FileMtime:   mtime,
+		Size:        size,
+		Width:       w,
+		Height:      h,
+		ThumbSmall:  small,
+		ThumbMedium: medium,
+		Original:    original,
+	}, nil
+}
+
 // queryParams holds all filters and pagination options for queryFiles.
 type queryParams struct {
 	folder   string // relative folder path; "" = all files

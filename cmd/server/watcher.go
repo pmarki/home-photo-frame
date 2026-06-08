@@ -27,6 +27,90 @@ func updateCachedFile(imgPath string, fi os.FileInfo, addIfMissing bool) {
 	}
 }
 
+// ── Event debouncer ───────────────────────────────────────────────────
+//
+// fsnotify emits many Write events while a single file is being copied in
+// (cp/rsync/Samba). Without debouncing we evict thumbnails and re-index
+// hundreds of times for one logical change. scheduleProcessing collapses
+// repeated events on the same path into a single deferred call after
+// debounceQuiet of silence, which also sidesteps the partial-Stat problem
+// of reacting immediately to a Create that's still being written.
+
+const debounceQuiet = 1 * time.Second
+
+type pendingProcess struct {
+	timer        *time.Timer
+	addIfMissing bool
+}
+
+var pending = struct {
+	sync.Mutex
+	m map[string]*pendingProcess
+}{m: make(map[string]*pendingProcess)}
+
+func scheduleProcessing(imgPath, absPath string, addIfMissing bool) {
+	pending.Lock()
+	defer pending.Unlock()
+	e, ok := pending.m[imgPath]
+	if !ok {
+		e = &pendingProcess{}
+		pending.m[imgPath] = e
+	}
+	if addIfMissing {
+		e.addIfMissing = true
+	}
+	if e.timer != nil {
+		e.timer.Stop()
+	}
+	var t *time.Timer
+	t = time.AfterFunc(debounceQuiet, func() {
+		pending.Lock()
+		// Stale-timer guard: a fresh scheduleProcessing for the same path
+		// will have replaced e.timer; bail without touching the map so the
+		// successor timer owns processing and cleanup.
+		cur, ok := pending.m[imgPath]
+		if !ok || cur != e || cur.timer != t {
+			pending.Unlock()
+			return
+		}
+		addIfMissing := cur.addIfMissing
+		delete(pending.m, imgPath)
+		pending.Unlock()
+
+		fi, err := os.Stat(absPath)
+		if err != nil {
+			return
+		}
+		// Skip if our DB row already records this exact mtime — an upload
+		// or crop handler self-indexed the file and re-running would just
+		// evict the small thumb it generated inline.
+		if dbMtimeMatches(imgPath, fi.ModTime()) {
+			return
+		}
+		updateCachedFile(imgPath, fi, addIfMissing)
+	})
+	e.timer = t
+}
+
+func cancelProcessing(imgPath string) {
+	pending.Lock()
+	defer pending.Unlock()
+	if e, ok := pending.m[imgPath]; ok {
+		if e.timer != nil {
+			e.timer.Stop()
+		}
+		delete(pending.m, imgPath)
+	}
+}
+
+func dbMtimeMatches(imgPath string, mtime time.Time) bool {
+	var ns int64
+	if err := db.QueryRow(`SELECT file_mtime FROM files WHERE path = ?`, imgPath).Scan(&ns); err != nil {
+		return false
+	}
+	return time.Unix(0, ns).Equal(mtime)
+}
+
 // addWatchRecursive registers root and all its subdirectories with watcher.
 func addWatchRecursive(watcher *fsnotify.Watcher, root string) {
 	filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error { //nolint:errcheck
@@ -124,21 +208,13 @@ func watchPhotosDir() {
 
 					switch {
 					case event.Has(fsnotify.Create):
-						time.Sleep(200 * time.Millisecond)
-						fi, err := os.Stat(event.Name)
-						if err != nil {
-							return
-						}
-						updateCachedFile(imgPath, fi, true)
+						scheduleProcessing(imgPath, event.Name, true)
 
 					case event.Has(fsnotify.Write):
-						fi, err := os.Stat(event.Name)
-						if err != nil {
-							return
-						}
-						updateCachedFile(imgPath, fi, false)
+						scheduleProcessing(imgPath, event.Name, false)
 
 					case event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename):
+						cancelProcessing(imgPath)
 						os.Remove(thumbSmallCachePath(imgPath))
 						os.Remove(thumbMediumCachePath(imgPath))
 						fileMu.Delete(imgPath)
