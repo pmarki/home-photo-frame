@@ -357,6 +357,22 @@ function navigate(dir) {
   }
 }
 
+// Warm the HTTP / SW cache with the immediate neighbours so navigating to
+// them is instant. Off-DOM Image() requests share the same browser cache
+// as the <img> in the lightbox.
+function preloadNeighbours() {
+  for (const offset of [-1, 1]) {
+    const neighbour = props.images[currentIndex.value + offset]
+    if (!neighbour || isVideo(neighbour.filename)) continue
+    const url = neighbour.thumbMedium || neighbour.original
+    if (!url) continue
+    const img = new Image()
+    img.decoding = 'async'
+    img.src = url
+  }
+}
+watch(currentIndex, preloadNeighbours, { immediate: true })
+
 // ── Keyboard navigation ───────────────────────────────────────────────
 function onKeydown(e) {
   if (e.key === 'ArrowLeft')       navigate(-1)
