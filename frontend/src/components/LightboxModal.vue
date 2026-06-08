@@ -107,6 +107,7 @@
             />
             <img
               v-else
+              ref="imgRef"
               :src="currentImage.thumbMedium || currentImage.original"
               :alt="currentImage.filename"
               class="lb-image"
@@ -157,6 +158,7 @@ const props = defineProps({
 const emit = defineEmits(['close', 'need-more', 'deleted', 'cropped'])
 
 const stageRef     = ref(null)
+const imgRef       = ref(null)
 const currentIndex = ref(props.initialIndex)
 const imgLoaded    = ref(false)
 const imgError     = ref(false)
@@ -217,11 +219,44 @@ function resetZoom() {
   panStart = null
 }
 
+// Compute the image's rendered size at scale 1 from naturalWidth/Height and
+// the stage's contain-fit. Used to clamp pan so the image can't drag entirely
+// off-screen at 2x zoom.
+function imageRenderedSize() {
+  if (!imgRef.value || !stageRef.value) return null
+  const naturalW = imgRef.value.naturalWidth
+  const naturalH = imgRef.value.naturalHeight
+  if (!naturalW || !naturalH) return null
+  const stage = stageRef.value.getBoundingClientRect()
+  const aspect = naturalW / naturalH
+  if (aspect > stage.width / stage.height) {
+    return { w: stage.width, h: stage.width / aspect, sw: stage.width, sh: stage.height }
+  }
+  return { w: stage.height * aspect, h: stage.height, sw: stage.width, sh: stage.height }
+}
+
+const ZOOM_SCALE = 2
+
+function clampPan(x, y) {
+  const size = imageRenderedSize()
+  if (!size) return { x, y }
+  const maxX = Math.max(0, (size.w * ZOOM_SCALE - size.sw) / 2)
+  const maxY = Math.max(0, (size.h * ZOOM_SCALE - size.sh) / 2)
+  return {
+    x: Math.max(-maxX, Math.min(maxX, x)),
+    y: Math.max(-maxY, Math.min(maxY, y)),
+  }
+}
+
 function toggleZoom(clientX, clientY) {
   if (zoomed.value) { resetZoom(); return }
   const rect = stageRef.value.getBoundingClientRect()
-  zoomPanX.value = -(clientX - rect.left - rect.width / 2)
-  zoomPanY.value = -(clientY - rect.top - rect.height / 2)
+  const { x, y } = clampPan(
+    -(clientX - rect.left - rect.width / 2),
+    -(clientY - rect.top - rect.height / 2),
+  )
+  zoomPanX.value = x
+  zoomPanY.value = y
   zoomed.value = true
 }
 
@@ -239,8 +274,9 @@ function onPanStart(e) {
 
 function onPanMove(e) {
   if (!isPanning.value || e.pointerType === 'touch') return
-  zoomPanX.value = e.clientX - panStart.x
-  zoomPanY.value = e.clientY - panStart.y
+  const { x, y } = clampPan(e.clientX - panStart.x, e.clientY - panStart.y)
+  zoomPanX.value = x
+  zoomPanY.value = y
 }
 
 function onPanEnd(e) {
@@ -397,8 +433,12 @@ function onTouchMove(e) {
   if (!zoomed.value || e.touches.length !== 1) return
   e.preventDefault()
   const t = e.touches[0]
-  zoomPanX.value += t.clientX - touchPanX
-  zoomPanY.value += t.clientY - touchPanY
+  const { x, y } = clampPan(
+    zoomPanX.value + (t.clientX - touchPanX),
+    zoomPanY.value + (t.clientY - touchPanY),
+  )
+  zoomPanX.value = x
+  zoomPanY.value = y
   touchPanX = t.clientX
   touchPanY = t.clientY
 }

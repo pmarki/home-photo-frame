@@ -132,8 +132,15 @@ func serveCachedThumb(
 		img, err = extractVideoFrame(srcPath)
 	} else {
 		img, err = imaging.Open(srcPath, imaging.AutoOrientation(true))
+		if err != nil {
+			if fb, ferr := decodeJPEGFallback(srcPath); ferr == nil {
+				log.Printf("thumb: stdlib decode failed for %s (%v); used ffmpeg fallback", imgPath, err)
+				img, err = fb, nil
+			}
+		}
 	}
 	if err != nil {
+		log.Printf("thumb: decode %s: %v", imgPath, err)
 		http.Error(w, "failed to decode image", http.StatusInternalServerError)
 		return
 	}
@@ -142,6 +149,7 @@ func serveCachedThumb(
 
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, thumb, &jpeg.Options{Quality: quality}); err != nil {
+		log.Printf("thumb: encode %s: %v", imgPath, err)
 		http.Error(w, "failed to encode thumbnail", http.StatusInternalServerError)
 		return
 	}
@@ -284,6 +292,12 @@ func warmupThumbnails() {
 				img, err = extractVideoFrame(srcPath)
 			} else {
 				img, err = imaging.Open(srcPath, imaging.AutoOrientation(true))
+				if err != nil {
+					if fb, ferr := decodeJPEGFallback(srcPath); ferr == nil {
+						log.Printf("warmup: stdlib decode failed for %s (%v); used ffmpeg fallback", p, err)
+						img, err = fb, nil
+					}
+				}
 			}
 			if err != nil {
 				log.Printf("warmup: open %s: %v", p, err)

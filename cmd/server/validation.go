@@ -61,6 +61,30 @@ func extractVideoFrame(srcPath string) (image.Image, error) {
 	return nil, fmt.Errorf("ffmpeg: could not extract frame from %s", srcPath)
 }
 
+// decodeJPEGFallback re-decodes a problematic JPEG via ffmpeg, which is far
+// more lenient than Go's stdlib image/jpeg (which rejects many real-world
+// camera JPEGs with errors like "missing 0xff00 sequence"). Requires ffmpeg
+// in PATH; returns an error if missing or if ffmpeg can't read the file.
+func decodeJPEGFallback(srcPath string) (image.Image, error) {
+	cmd := exec.Command("ffmpeg",
+		"-loglevel", "error",
+		"-i", srcPath,
+		"-frames:v", "1",
+		"-f", "image2pipe", "-vcodec", "mjpeg", "-q:v", "2", "-")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg: %w", err)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("ffmpeg: empty output")
+	}
+	img, _, err := image.Decode(bytes.NewReader(out))
+	if err != nil {
+		return nil, fmt.Errorf("decode ffmpeg output: %w", err)
+	}
+	return img, nil
+}
+
 // isValidFilename rejects empty names, names containing path separators, and "..".
 func isValidFilename(filename string) bool {
 	return filename != "" && !strings.ContainsAny(filename, "/\\") && filename != ".." && filename != "."

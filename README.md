@@ -92,6 +92,8 @@ make build          # builds frontend, compiles binary with embedded assets
 | `-icons-dir` | `ICONS_DIR` | *(embedded)* | Directory with custom `icon-192.png` / `icon-512.png`; falls back to built-in icons when unset |
 | `-video` | `VIDEO` | `false` | Enable video upload, thumbnails (via ffmpeg), and in-browser playback. Accepted formats: `.mp4`, `.webm`, `.mov`, `.m4v`. Requires `ffmpeg` in `PATH` (`VIDEO=1`) |
 
+> **ffmpeg is also recommended even without `-video`.** Go's stdlib JPEG decoder is strict and rejects some real-world camera JPEGs (typical error: *missing 0xff00 sequence*). When `ffmpeg` is in `PATH`, the server transparently falls back to it for both warmup and on-demand thumbnail generation, so problematic files still display correctly. Without `ffmpeg` those specific files return `500` and are logged as `thumb: decode … missing 0xff00 sequence`.
+
 The binary is fully self-contained — copy it anywhere with a `photos/` folder alongside and it works.
 
 ### Docker

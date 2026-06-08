@@ -232,7 +232,14 @@ func saveUploadedFile(w http.ResponseWriter, src io.Reader, originalName string)
 
 	var imgW, imgH int
 	if !isVideo(safeName) {
-		if srcImg, err := imaging.Open(destPath, imaging.AutoOrientation(true)); err == nil {
+		srcImg, derr := imaging.Open(destPath, imaging.AutoOrientation(true))
+		if derr != nil {
+			if fb, ferr := decodeJPEGFallback(destPath); ferr == nil {
+				log.Printf("upload: stdlib decode failed for %s (%v); used ffmpeg fallback", safeName, derr)
+				srcImg, derr = fb, nil
+			}
+		}
+		if derr == nil {
 			b := srcImg.Bounds()
 			imgW, imgH = b.Dx(), b.Dy()
 			thumb := imaging.Fit(srcImg, thumbnailSize, thumbnailSize, imaging.Lanczos)
