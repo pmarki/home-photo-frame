@@ -242,6 +242,17 @@ func saveUploadedFile(w http.ResponseWriter, src io.Reader, originalName string)
 				jpeg.Encode(f, thumb, &jpeg.Options{Quality: 85}) //nolint:errcheck
 				f.Close()
 			}
+			// Medium thumb from the same decoded image — avoids a second
+			// full decode on the first lightbox view.
+			var mediumImg image.Image = srcImg
+			if b.Dx() > mediumWidth {
+				mediumImg = imaging.Resize(srcImg, mediumWidth, 0, imaging.Lanczos)
+			}
+			mp := thumbMediumCachePath(safeName)
+			if f, err := os.Create(mp); err == nil {
+				jpeg.Encode(f, mediumImg, &jpeg.Options{Quality: 90}) //nolint:errcheck
+				f.Close()
+			}
 		}
 	}
 
