@@ -14,17 +14,30 @@ import (
 // filenameDate matches patterns like 20190318_132033 at the start of the base name.
 var filenameDate = regexp.MustCompile(`^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})`)
 
+// exifDate opens srcPath and returns DateTimeOriginal / DateTime from EXIF.
+// The file handle is closed via defer so an EXIF library panic does not leak it.
+func exifDate(srcPath string) (time.Time, bool) {
+	f, err := os.Open(srcPath)
+	if err != nil {
+		return time.Time{}, false
+	}
+	defer f.Close()
+	x, err := exif.Decode(f)
+	if err != nil {
+		return time.Time{}, false
+	}
+	t, err := x.DateTime()
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
 func extractBestDate(filename, srcPath string) time.Time {
 	// 1. EXIF DateTimeOriginal / DateTime (images only — videos have no EXIF)
 	if !isVideo(filename) {
-		if f, err := os.Open(srcPath); err == nil {
-			if x, err := exif.Decode(f); err == nil {
-				if t, err := x.DateTime(); err == nil {
-					f.Close()
-					return t
-				}
-			}
-			f.Close()
+		if t, ok := exifDate(srcPath); ok {
+			return t
 		}
 	}
 	// 2. Filename pattern: YYYYMMDD_HHMMSS at start of base name

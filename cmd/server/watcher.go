@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io/fs"
 	"log"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -111,15 +113,54 @@ func dbMtimeMatches(imgPath string, mtime time.Time) bool {
 	return time.Unix(0, ns).Equal(mtime)
 }
 
+// watchedDirs tracks absolute paths of directories successfully added to the
+// fsnotify watcher so we can explicitly Remove them on Rename/Remove events.
+var watchedDirs sync.Map // string -> struct{}
+
 // addWatchRecursive registers root and all its subdirectories with watcher.
-func addWatchRecursive(watcher *fsnotify.Watcher, root string) {
+// Returns counts so the caller can log a one-line summary.
+func addWatchRecursive(watcher *fsnotify.Watcher, root string) (added, failed int) {
+	var firstErr error
 	filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error { //nolint:errcheck
-		if err == nil && d.IsDir() {
-			if werr := watcher.Add(p); werr != nil {
-				log.Printf("watcher: failed to watch dir %s: %v", p, werr)
+		if err != nil || !d.IsDir() {
+			return nil
+		}
+		if werr := watcher.Add(p); werr != nil {
+			if firstErr == nil {
+				firstErr = werr
 			}
+			failed++
+			log.Printf("watcher: failed to watch dir %s: %v", p, werr)
+		} else {
+			watchedDirs.Store(p, struct{}{})
+			added++
 		}
 		return nil
+	})
+	if failed > 0 && firstErr != nil {
+		if errors.Is(firstErr, syscall.ENOSPC) {
+			log.Printf("watcher: hit inotify limit under %s — raise it on Linux with `sudo sysctl fs.inotify.max_user_watches=524288`", root)
+		} else {
+			log.Printf("watcher: first failure under %s: %v", root, firstErr)
+		}
+	}
+	return added, failed
+}
+
+// removeWatchRecursive drops root and any tracked subdirectories from the
+// fsnotify watcher. Safe to call when the directory has already been removed
+// from disk — fsnotify.Remove just returns an error which we ignore.
+func removeWatchRecursive(watcher *fsnotify.Watcher, root string) {
+	prefix := root + string(filepath.Separator)
+	watchedDirs.Delete(root)
+	watcher.Remove(root) //nolint:errcheck
+	watchedDirs.Range(func(k, _ any) bool {
+		p := k.(string)
+		if strings.HasPrefix(p, prefix) {
+			watchedDirs.Delete(p)
+			watcher.Remove(p) //nolint:errcheck
+		}
+		return true
 	})
 }
 
@@ -168,8 +209,8 @@ func watchPhotosDir() {
 		log.Printf("watcher: failed to create: %v", err)
 		return
 	}
-	addWatchRecursive(watcher, photosDir)
-	log.Printf("watcher: watching %s (recursive)", photosDir)
+	added, failed := addWatchRecursive(watcher, photosDir)
+	log.Printf("watcher: watching %s — %d directories, %d failed", photosDir, added, failed)
 
 	go func() {
 		defer watcher.Close()
@@ -195,8 +236,21 @@ func watchPhotosDir() {
 					if event.Has(fsnotify.Create) {
 						fi, statErr := os.Stat(event.Name)
 						if statErr == nil && fi.IsDir() {
-							addWatchRecursive(watcher, event.Name)
+							added, failed := addWatchRecursive(watcher, event.Name)
+							if added > 1 || failed > 0 {
+								log.Printf("watcher: added subtree %s — %d directories, %d failed", event.Name, added, failed)
+							}
 							indexNewlyArrivedDir(event.Name)
+							return
+						}
+					}
+
+					// Directory removal/rename: clean up our tracked watches
+					// before the supportedExts filter drops the event. File
+					// children inside the dir arrive as their own events.
+					if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+						if _, isDir := watchedDirs.Load(event.Name); isDir {
+							removeWatchRecursive(watcher, event.Name)
 							return
 						}
 					}

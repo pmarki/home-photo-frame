@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"io/fs"
 	"log"
@@ -31,7 +33,7 @@ var (
 )
 
 var frontendFS fs.FS
-var rawManifest []byte
+var manifestBody []byte
 var frontendHandler func() http.Handler
 
 func envOr(key, fallback string) string {
@@ -104,7 +106,11 @@ func main() {
 
 	if frontendFS != nil {
 		if data, err := fs.ReadFile(frontendFS, "manifest.webmanifest"); err == nil {
-			rawManifest = data
+			if body, berr := buildManifest(data); berr == nil {
+				manifestBody = body
+			} else {
+				log.Printf("manifest: build failed: %v", berr)
+			}
 		} else {
 			log.Printf("manifest: could not read: %v", err)
 		}
@@ -153,11 +159,24 @@ func main() {
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	shutdownDone := make(chan struct{})
 	go func() {
 		<-quit
-		log.Println("Exiting...")
-		os.Exit(0)
+		log.Println("shutdown: signal received")
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("shutdown: server: %v", err)
+		}
+		if err := db.Close(); err != nil {
+			log.Printf("shutdown: db: %v", err)
+		}
+		close(shutdownDone)
 	}()
 
-	log.Fatal(srv.ListenAndServe())
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("server: %v", err)
+	}
+	<-shutdownDone
+	log.Println("shutdown: clean exit")
 }

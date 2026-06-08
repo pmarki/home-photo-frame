@@ -459,15 +459,14 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func handleManifest(w http.ResponseWriter, r *http.Request) {
-	if rawManifest == nil {
-		http.Error(w, "manifest not available", http.StatusInternalServerError)
-		return
-	}
-	var m map[string]interface{}
-	if err := json.Unmarshal(rawManifest, &m); err != nil {
-		http.Error(w, "manifest parse error", http.StatusInternalServerError)
-		return
+// buildManifest takes the raw embedded manifest bytes, merges in runtime
+// config (title, background colour, video accept types), and returns the
+// JSON bytes to serve. Called once at startup; the result is cached in
+// manifestBody.
+func buildManifest(raw []byte) ([]byte, error) {
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
 	}
 	m["name"] = appTitle
 	m["short_name"] = appTitle
@@ -485,14 +484,17 @@ func handleManifest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	data, err := json.Marshal(m)
-	if err != nil {
-		http.Error(w, "manifest encode error", http.StatusInternalServerError)
+	return json.Marshal(m)
+}
+
+func handleManifest(w http.ResponseWriter, r *http.Request) {
+	if manifestBody == nil {
+		http.Error(w, "manifest not available", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/manifest+json")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Write(data) //nolint:errcheck
+	w.Write(manifestBody) //nolint:errcheck
 }
 
 func handleIcons(w http.ResponseWriter, r *http.Request) {
