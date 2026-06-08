@@ -25,7 +25,7 @@
           class="gallery-item"
           role="listitem"
           :aria-label="img.filename"
-          :class="{ 'has-dims': img.width && img.height }"
+          :class="{ 'has-dims': img.width && img.height, 'img-loading': loadingSet.has(img.thumbSmall), 'img-error': errorSet.has(img.thumbSmall) }"
           :style="img.width && img.height ? { '--cover-scale': coverScale(img) } : {}"
           @click="$emit('open', startIdx + i)"
         >
@@ -34,15 +34,24 @@
             :alt="img.filename"
             decoding="async"
             class="gallery-thumb"
-            @load="e => e.target.style.opacity = '1'"
+            @load="onImgLoad"
             @error="onImgError"
           />
+          <span class="img-loader" aria-hidden="true"><span /><span /><span /></span>
+          <span class="img-broken" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2"/>
+              <path d="M3 14l5-5 4 4 3-3 6 6"/>
+              <circle cx="8.5" cy="8.5" r="1.5"/>
+              <line x1="2" y1="2" x2="22" y2="22"/>
+            </svg>
+          </span>
           <div v-if="isVideo(img.filename)" class="video-badge" aria-hidden="true">▶</div>
           <div class="gallery-overlay" aria-hidden="true">
             <span class="gallery-name">{{ img.filename }}</span>
           </div>
           <div
-            v-if="img.width && img.height"
+            v-if="img.width && img.height && !loadingSet.has(img.thumbSmall) && !errorSet.has(img.thumbSmall)"
             class="orientation-badge"
             :class="imgOrientation(img)"
             aria-hidden="true"
@@ -76,7 +85,7 @@
 </template>
 
 <script setup>
-import { ref, toRef } from 'vue'
+import { ref, toRef, reactive } from 'vue'
 import GalleryPlaceholder from './GalleryPlaceholder.vue'
 import YearScrollbar from './YearScrollbar.vue'
 import { useVirtualScroll } from '../composables/useVirtualScroll.js'
@@ -108,23 +117,32 @@ const { yearItems, currentYear, visible: yearVisible, handlePos, maxScrollY } = 
   viewportHeight,
 })
 
+const loadingSet = reactive(new Set())
+const errorSet   = reactive(new Set())
+
 // Delay setting img.src until the item has been in view for 200 ms.
 // If the item scrolls out before the timer fires (fast scroll), unmounted
 // clears the timer and the thumbnail request never happens.
 const vLazySrc = {
   mounted(el, { value }) {
+    el._lazyValue = value
     el._lazySrcTimer = setTimeout(() => { el.src = value }, 200)
+    loadingSet.add(value)
   },
   updated(el, { value, oldValue }) {
     if (value !== oldValue) {
       clearTimeout(el._lazySrcTimer)
       el.style.opacity = '0'
+      el._lazyValue = value
       el._lazySrcTimer = setTimeout(() => { el.src = value }, 200)
+      loadingSet.delete(oldValue)
+      loadingSet.add(value)
     }
   },
   unmounted(el) {
     clearTimeout(el._lazySrcTimer)
     el.removeAttribute('src')
+    loadingSet.delete(el._lazyValue)
   },
 }
 
@@ -135,8 +153,15 @@ function coverScale(img) {
   return Math.max(img.width, img.height) / Math.min(img.width, img.height)
 }
 
+function onImgLoad(e) {
+  e.target.style.opacity = '1'
+  loadingSet.delete(e.target._lazyValue)
+}
+
 function onImgError(e) {
-  e.target.style.opacity = '0.15'
+  e.target.style.opacity = '0'
+  loadingSet.delete(e.target._lazyValue)
+  errorSet.add(e.target._lazyValue)
 }
 
 function imgOrientation(img) {
@@ -295,4 +320,56 @@ function imgOrientation(img) {
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ─── Per-image dots loader ────────────────────────────────────────── */
+.img-loader {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  pointer-events: none;
+}
+
+.img-loading .img-loader {
+  display: flex;
+}
+
+.img-loader span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.3);
+  animation: img-dot 1.1s ease-in-out infinite;
+}
+
+.img-loader span:nth-child(1) { animation-delay: -0.36s; }
+.img-loader span:nth-child(2) { animation-delay: -0.18s; }
+.img-loader span:nth-child(3) { animation-delay: 0s; }
+
+@keyframes img-dot {
+  0%, 60%, 100% { transform: scale(0.65); opacity: 0.25; }
+  30%           { transform: scale(1);    opacity: 0.75; }
+}
+
+/* ─── Broken image icon ─────────────────────────────────────────────── */
+.img-broken {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.img-error .img-broken {
+  display: flex;
+}
+
+.img-broken svg {
+  width: 32px;
+  height: 32px;
+  color: rgba(255, 255, 255, 0.2);
+}
 </style>

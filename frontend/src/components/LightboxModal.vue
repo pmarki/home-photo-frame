@@ -107,7 +107,7 @@
             />
             <img
               v-else
-              :src="currentImage.original"
+              :src="currentImage.thumbMedium || currentImage.original"
               :alt="currentImage.filename"
               class="lb-image"
               :class="{ loaded: imgLoaded }"
