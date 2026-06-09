@@ -93,9 +93,21 @@ func main() {
 		*p = abs
 	}
 
-	for _, dir := range []string{cacheDir, photosDir, filepath.Join(cacheDir, "s"), filepath.Join(cacheDir, "m")} {
+	for _, dir := range []string{cacheDir, photosDir, dbDir, filepath.Join(cacheDir, "s"), filepath.Join(cacheDir, "m")} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			log.Fatalf("cannot create directory %s: %v", dir, err)
+		}
+	}
+
+	// db and cache dirs must be writable — SQLite writes the .db file and we
+	// continuously write thumbs into cache/s and cache/m. photos dir is allowed
+	// to be read-only (the repair-on-fallback path handles that gracefully).
+	for _, c := range []struct{ dir, label string }{
+		{dbDir, "db"},
+		{cacheDir, "cache"},
+	} {
+		if err := assertDirWritable(c.dir); err != nil {
+			log.Fatalf("%s directory %s is not writable: %v", c.label, c.dir, err)
 		}
 	}
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"image"
 	"image/jpeg"
 	"io"
@@ -136,6 +137,14 @@ func serveCachedThumb(
 			if fb, ferr := decodeJPEGFallback(srcPath); ferr == nil {
 				log.Printf("thumb: stdlib decode failed for %s (%v); used ffmpeg fallback", imgPath, err)
 				img, err = fb, nil
+				switch rerr := repairOriginalJPEG(srcPath, img); {
+				case rerr == nil:
+					log.Printf("thumb: repaired %s in place", imgPath)
+				case errors.Is(rerr, errReadOnlyPhotos):
+					log.Printf("thumb: repair %s skipped: photos dir not writable", imgPath)
+				default:
+					log.Printf("thumb: repair %s failed: %v", imgPath, rerr)
+				}
 			}
 		}
 	}
@@ -296,6 +305,14 @@ func warmupThumbnails() {
 					if fb, ferr := decodeJPEGFallback(srcPath); ferr == nil {
 						log.Printf("warmup: stdlib decode failed for %s (%v); used ffmpeg fallback", p, err)
 						img, err = fb, nil
+						switch rerr := repairOriginalJPEG(srcPath, img); {
+						case rerr == nil:
+							log.Printf("warmup: repaired %s in place", p)
+						case errors.Is(rerr, errReadOnlyPhotos):
+							log.Printf("warmup: repair %s skipped: photos dir not writable", p)
+						default:
+							log.Printf("warmup: repair %s failed: %v", p, rerr)
+						}
 					}
 				}
 			}

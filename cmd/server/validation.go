@@ -2,14 +2,23 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
+	"image/jpeg"
+	"io/fs"
 	"net/url"
+	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
 )
+
+// errReadOnlyPhotos is returned by repairOriginalJPEG when the photos
+// directory (or the file itself) can't be written. Callers should treat this
+// as "skipped, not failed" so the log isn't noisy on read-only deployments.
+var errReadOnlyPhotos = errors.New("photos dir is read-only")
 
 var videoExts = map[string]bool{
 	".mp4":  true,
@@ -83,6 +92,69 @@ func decodeJPEGFallback(srcPath string) (image.Image, error) {
 		return nil, fmt.Errorf("decode ffmpeg output: %w", err)
 	}
 	return img, nil
+}
+
+// repairOriginalJPEG re-encodes a malformed JPEG (one that needed
+// decodeJPEGFallback) over its source path so /api/original/... serves bytes
+// the browser can render. Preserves the original APP1 EXIF segment when
+// extractable (with orientation reset to 1 and IFD1 thumbnail stripped, since
+// pixels are already auto-oriented); otherwise drops EXIF. img must be the
+// already-decoded, auto-oriented pixels (i.e. the value returned by the
+// fallback). Uses .tmp + rename for atomicity. Returns errReadOnlyPhotos when
+// the photos directory can't be written, so callers can downgrade the log.
+func repairOriginalJPEG(srcPath string, img image.Image) error {
+	// Pre-flight: rename requires write on the parent directory and .tmp
+	// creation needs the same. Probe with a short-lived file so we don't
+	// burn a JPEG encode on a read-only deployment.
+	probe, err := os.CreateTemp(filepath.Dir(srcPath), ".repair-probe-*")
+	if err != nil {
+		if errors.Is(err, fs.ErrPermission) {
+			return errReadOnlyPhotos
+		}
+		return fmt.Errorf("probe: %w", err)
+	}
+	probe.Close()
+	os.Remove(probe.Name())
+
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 95}); err != nil {
+		return fmt.Errorf("encode: %w", err)
+	}
+	out := buf.Bytes()
+	if orig, err := os.ReadFile(srcPath); err == nil {
+		if app1 := extractJPEGApp1(orig); app1 != nil {
+			out = injectJPEGApp1(out, resetExifOrientation(app1))
+		}
+	}
+	tmp := srcPath + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+		if errors.Is(err, fs.ErrPermission) {
+			return errReadOnlyPhotos
+		}
+		return fmt.Errorf("write tmp: %w", err)
+	}
+	if err := os.Rename(tmp, srcPath); err != nil {
+		os.Remove(tmp)
+		if errors.Is(err, fs.ErrPermission) {
+			return errReadOnlyPhotos
+		}
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
+}
+
+// assertDirWritable verifies the process can create files in dir by writing
+// (and then removing) a short-lived probe file. Detects read-only mounts,
+// permission mismatches, and full filesystems before the server starts
+// serving.
+func assertDirWritable(dir string) error {
+	f, err := os.CreateTemp(dir, ".perm-probe-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	f.Close()
+	return os.Remove(name)
 }
 
 // isValidFilename rejects empty names, names containing path separators, and "..".
