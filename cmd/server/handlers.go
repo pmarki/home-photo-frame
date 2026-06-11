@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/disintegration/imaging"
@@ -453,15 +454,70 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(info) //nolint:errcheck
 }
 
+func handleFolders(w http.ResponseWriter, r *http.Request) {
+	rows, err := db.Query(`SELECT DISTINCT folder FROM files WHERE folder != '' ORDER BY folder`)
+	if err != nil {
+		log.Printf("handleFolders: query error: %v", err)
+		http.Error(w, "query failed", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	folders := []string{}
+	for rows.Next() {
+		var f string
+		if err := rows.Scan(&f); err != nil {
+			log.Printf("handleFolders: scan error: %v", err)
+			http.Error(w, "scan failed", http.StatusInternalServerError)
+			return
+		}
+		folders = append(folders, f)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("handleFolders: rows error: %v", err)
+		http.Error(w, "rows failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"folders": folders,
+	})
+}
+
+// buildNumber is injected at build time via -ldflags "-X main.buildNumber=…".
+// In dev runs (and tests) it stays as "dev".
+var buildNumber = "dev"
+
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	titleIcon := iconsDir != ""
+
+	var imageCount int
+	var imageTotalBytes int64
+	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(size), 0) FROM files`).Scan(&imageCount, &imageTotalBytes); err != nil {
+		log.Printf("handleConfig: stats query: %v", err)
+	}
+
+	var diskFreeBytes int64
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(photosDir, &stat); err != nil {
+		log.Printf("handleConfig: statfs %s: %v", photosDir, err)
+	} else {
+		diskFreeBytes = int64(stat.Bavail) * int64(stat.Bsize)
+	}
+
 	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-		"title":        appTitle,
-		"videoEnabled": videoEnabled,
-		"bgColor":      bgColor,
-		"titleIcon":    titleIcon,
+		"title":           appTitle,
+		"videoEnabled":    videoEnabled,
+		"bgColor":         bgColor,
+		"titleIcon":       titleIcon,
+		"buildNumber":     buildNumber,
+		"imageCount":      imageCount,
+		"imageTotalBytes": imageTotalBytes,
+		"diskFreeBytes":   diskFreeBytes,
 	})
 }
 

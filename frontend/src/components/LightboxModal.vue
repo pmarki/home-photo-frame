@@ -139,7 +139,12 @@
 
     <!-- Bottom bar -->
     <div class="lb-footer">
-      <span class="lb-path" :class="{ copied: pathCopied }" @click="copyPath" title="Copy path">{{ pathCopied ? 'Copied!' : currentImage.path }}</span>
+      <span class="lb-path" :class="{ copied: pathCopied }" @click="copyPath" title="Copy path">
+        <svg class="lb-path-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+        </svg>
+        <span class="lb-path-text">{{ pathCopied ? 'Copied!' : folderOf(currentImage.path) }}</span>
+      </span>
       <span class="lb-date">{{ formatDate(currentImage.modTime) }}</span>
     </div>
   </div>
@@ -474,6 +479,12 @@ function formatDate(iso) {
   return dateFormatter.format(new Date(iso))
 }
 
+function folderOf(path) {
+  if (!path) return ''
+  const slash = path.lastIndexOf('/')
+  return slash < 0 ? '' : path.slice(0, slash)
+}
+
 // Reset image state when the displayed image changes (navigation or crop replacement)
 watch(() => currentImage.value.filename, () => {
   imgLoaded.value = false
@@ -681,14 +692,26 @@ onUnmounted(() => {
 }
 
 .lb-path {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 0.78rem;
   color: #666;
+  min-width: 0;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.lb-path-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+.lb-path-text {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
-  cursor: pointer;
-  transition: color 0.15s;
 }
 .lb-path:hover { color: #999; }
 .lb-path.copied { color: #6ee7b7; }

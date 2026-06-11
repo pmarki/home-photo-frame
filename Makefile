@@ -3,6 +3,7 @@
 GO        ?= $(shell which go 2>/dev/null || echo $(HOME)/go/bin/go)
 GOVERSION := 1.22.5
 BINARY    := photo-frame
+BUILD_NUM := $(shell date +%Y%m%d-%H%M)
 
 # ── First-time setup ─────────────────────────────────────────────────
 setup: install-go deps icons frontend-install
@@ -57,7 +58,7 @@ build: icons
 	rm -rf cmd/server/frontend/dist
 	cp -r frontend/dist cmd/server/frontend/dist
 	@echo "Compiling binary with embedded frontend..."
-	CGO_ENABLED=0 $(GO) build -ldflags="-s -w" -o $(BINARY) ./cmd/server/
+	CGO_ENABLED=0 $(GO) build -ldflags="-s -w -X main.buildNumber=$(BUILD_NUM)" -o $(BINARY) ./cmd/server/
 	@echo ""
 	@echo "Binary ready: ./$(BINARY)"
 	@echo "Run:  ./$(BINARY) -photos ./photos"

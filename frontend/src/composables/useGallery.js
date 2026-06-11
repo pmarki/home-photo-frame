@@ -12,6 +12,11 @@ function normalizeMode(m) {
   return MODE_SORT[m] ? m : 'gallery'
 }
 
+function readFolderFromUrl() {
+  const m = window.location.pathname.match(/^\/folder\/(.+?)\/?$/)
+  return m ? decodeURI(m[1]) : ''
+}
+
 export function useGallery() {
   const images = ref([])
   const total = ref(0)
@@ -21,6 +26,7 @@ export function useGallery() {
   const viewMode = ref(normalizeMode(localStorage.getItem('viewMode')))
   const sortBy = ref(MODE_SORT[viewMode.value].sortBy)
   const sortOrder = ref(MODE_SORT[viewMode.value].sortOrder)
+  const folder = ref(readFolderFromUrl())
   let generation = 0
   let currentController = null
 
@@ -46,6 +52,7 @@ export function useGallery() {
         page: nextPage,
         limit: PAGE_LIMIT,
       })
+      if (folder.value) params.set('folder', folder.value)
       const res = await fetch(`/api/images?${params}`, { signal: controller.signal })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
@@ -124,6 +131,14 @@ export function useGallery() {
     await loadNextPage()
   }
 
+  async function setFolder(f) {
+    const target = f || ''
+    if (folder.value === target) return
+    folder.value = target
+    resetState()
+    await loadNextPage()
+  }
+
   return {
     images,
     total,
@@ -131,8 +146,10 @@ export function useGallery() {
     error,
     hasMore,
     viewMode,
+    folder,
     loadNextPage,
     setViewMode,
+    setFolder,
     removeImage,
     replaceImage,
     forceReload,

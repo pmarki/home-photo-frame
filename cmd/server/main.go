@@ -145,6 +145,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/images", handleImages)
+	mux.HandleFunc("/api/folders", handleFolders)
 	mux.HandleFunc("/api/config", handleConfig)
 	mux.HandleFunc("/api/thumb/", handleThumb)
 	mux.HandleFunc("/api/thumb-medium/", handleThumbMedium)

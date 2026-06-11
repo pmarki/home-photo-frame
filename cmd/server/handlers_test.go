@@ -155,6 +155,33 @@ func TestHandleConfig(t *testing.T) {
 		if m["titleIcon"] != false {
 			t.Errorf("titleIcon = %v, want false (no iconsDir set)", m["titleIcon"])
 		}
+		if m["buildNumber"] != "dev" {
+			t.Errorf("buildNumber = %q, want %q", m["buildNumber"], "dev")
+		}
+		if m["imageCount"] != float64(0) {
+			t.Errorf("imageCount = %v, want 0", m["imageCount"])
+		}
+		if m["imageTotalBytes"] != float64(0) {
+			t.Errorf("imageTotalBytes = %v, want 0", m["imageTotalBytes"])
+		}
+		if free, ok := m["diskFreeBytes"].(float64); !ok || free <= 0 {
+			t.Errorf("diskFreeBytes = %v, want positive number", m["diskFreeBytes"])
+		}
+	})
+
+	t.Run("counts seeded files and sums their sizes", func(t *testing.T) {
+		setupTestEnv(t)
+		seedFile(t, "a.jpg", makeTestJPEG(10, 10))
+		seedFile(t, "b.jpg", makeTestJPEG(20, 20))
+		rr := doRequest(handleConfig, http.MethodGet, "/api/config", nil, "")
+		var m map[string]any
+		json.NewDecoder(rr.Body).Decode(&m) //nolint:errcheck
+		if m["imageCount"] != float64(2) {
+			t.Errorf("imageCount = %v, want 2", m["imageCount"])
+		}
+		if total, ok := m["imageTotalBytes"].(float64); !ok || total <= 0 {
+			t.Errorf("imageTotalBytes = %v, want positive sum", m["imageTotalBytes"])
+		}
 	})
 
 	t.Run("titleIcon true when iconsDir is set", func(t *testing.T) {
@@ -166,6 +193,62 @@ func TestHandleConfig(t *testing.T) {
 		json.NewDecoder(rr.Body).Decode(&m) //nolint:errcheck
 		if m["titleIcon"] != true {
 			t.Errorf("titleIcon = %v, want true", m["titleIcon"])
+		}
+	})
+}
+
+// ── TestHandleFolders ─────────────────────────────────────────────────────
+
+func TestHandleFolders(t *testing.T) {
+	t.Run("empty database returns empty list", func(t *testing.T) {
+		setupTestEnv(t)
+		rr := doRequest(handleFolders, http.MethodGet, "/api/folders", nil, "")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rr.Code)
+		}
+		var resp struct{ Folders []string }
+		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(resp.Folders) != 0 {
+			t.Errorf("folders = %v, want empty", resp.Folders)
+		}
+	})
+
+	t.Run("returns sorted distinct non-empty folders", func(t *testing.T) {
+		setupTestEnv(t)
+		now := time.Now().UnixNano()
+		rows := []struct{ path, folder string }{
+			{"vacation/hawaii/a.jpg", "vacation/hawaii"},
+			{"vacation/hawaii/b.jpg", "vacation/hawaii"}, // dup folder
+			{"vacation/c.jpg", "vacation"},
+			{"family/d.jpg", "family"},
+			{"root.jpg", ""}, // root file, should be excluded
+		}
+		for _, r := range rows {
+			if _, err := db.Exec(
+				`INSERT INTO files (path,filename,folder,file_type,width,height,size,file_mtime,date_taken,indexed_at) VALUES (?,?,?,'image',0,0,0,?,?,?)`,
+				r.path, filepath.Base(r.path), r.folder, now, now, now,
+			); err != nil {
+				t.Fatalf("insert: %v", err)
+			}
+		}
+		rr := doRequest(handleFolders, http.MethodGet, "/api/folders", nil, "")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rr.Code)
+		}
+		var resp struct{ Folders []string }
+		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		want := []string{"family", "vacation", "vacation/hawaii"}
+		if len(resp.Folders) != len(want) {
+			t.Fatalf("folders = %v, want %v", resp.Folders, want)
+		}
+		for i, w := range want {
+			if resp.Folders[i] != w {
+				t.Errorf("folders[%d] = %q, want %q", i, resp.Folders[i], w)
+			}
 		}
 	})
 }

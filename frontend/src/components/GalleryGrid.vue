@@ -49,6 +49,12 @@
           <div v-if="isVideo(img.filename)" class="video-badge" aria-hidden="true">▶</div>
           <div class="gallery-overlay" aria-hidden="true">
             <span class="gallery-name">{{ img.filename }}</span>
+            <span v-if="folderOf(img.path)" class="gallery-folder">
+              <svg class="gallery-folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+              </svg>
+              <span class="gallery-folder-text">{{ folderOf(img.path) }}</span>
+            </span>
           </div>
           <span class="gallery-filename" aria-hidden="true">{{ img.filename }}</span>
           <div
@@ -173,6 +179,12 @@ function imgOrientation(img) {
   if (img.width > img.height) return 'landscape'
   if (img.height > img.width) return 'portrait'
   return 'square'
+}
+
+function folderOf(path) {
+  if (!path) return ''
+  const slash = path.lastIndexOf('/')
+  return slash < 0 ? '' : path.slice(0, slash)
 }
 </script>
 
@@ -311,10 +323,16 @@ function imgOrientation(img) {
 /* Persistent caption span — only rendered (display) in Browser mode. */
 .gallery-filename { display: none; }
 
+/* Folder line — only shown in Timeline mode. */
+.gallery-folder { display: none; }
+
 /* ─── Timeline mode: always-visible filename overlay ────────────────── */
 .mode-timeline .gallery-overlay {
   opacity: 1;
   background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.55) 35%, transparent 70%);
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-end;
 }
 .mode-timeline .gallery-name {
   display: block;
@@ -323,6 +341,28 @@ function imgOrientation(img) {
   overflow: hidden;
   text-overflow: ellipsis;
   word-break: normal;
+}
+.mode-timeline .gallery-folder {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  width: 100%;
+  font-size: 0.65rem;
+  color: rgba(255, 255, 255, 0.65);
+  min-width: 0;
+}
+.gallery-folder-icon {
+  width: 11px;
+  height: 11px;
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+.gallery-folder-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 /* ─── Browser mode: single-column file-browser-like rows ────────────── */
@@ -358,7 +398,8 @@ function imgOrientation(img) {
 }
 
 .mode-browser .gallery-overlay,
-.mode-browser .orientation-badge { display: none; }
+.mode-browser .orientation-badge,
+.mode-timeline .orientation-badge { display: none; }
 
 .mode-browser .video-badge {
   top: 4px;

@@ -2,40 +2,39 @@
   <div class="app">
     <header class="app-header">
       <h1 class="app-title">
-        <img v-if="titleIcon" :src="'/icons/favicon.svg'" class="title-icon" alt="" />
-        <svg v-else class="title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-          <!-- frame border -->
-          <rect x="2" y="2" width="20" height="20" rx="1.5"/>
-          <!-- mat inset -->
-          <rect x="4.5" y="4.5" width="15" height="15" rx="0.5"/>
-          <!-- sun -->
-          <circle cx="16" cy="8.5" r="1.5" fill="currentColor" stroke="none"/>
-          <!-- mountain -->
-          <polyline points="5.5,17 10,10.5 14.5,17"/>
-        </svg>
+        <button class="title-icon-btn" aria-label="Open menu" @click="openSideMenu">
+          <img v-if="titleIcon" :src="'/icons/favicon.svg'" class="title-icon" alt="" />
+          <svg v-else class="title-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <!-- frame border -->
+            <rect x="2" y="2" width="20" height="20" rx="1.5"/>
+            <!-- mat inset -->
+            <rect x="4.5" y="4.5" width="15" height="15" rx="0.5"/>
+            <!-- sun -->
+            <circle cx="16" cy="8.5" r="1.5" fill="currentColor" stroke="none"/>
+            <!-- mountain -->
+            <polyline points="5.5,17 10,10.5 14.5,17"/>
+          </svg>
+        </button>
         {{ appTitle }}
       </h1>
 
       <ViewModeToggle :mode="viewMode" @change="setViewMode" />
-
-      <button class="upload-icon-btn" title="Upload photos" @click="fileInput.click()">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
-          <polyline points="17 8 12 3 7 8"/>
-          <line x1="12" y1="3" x2="12" y2="15"/>
-        </svg>
-      </button>
-      <input
-        ref="fileInput"
-        type="file"
-        multiple
-        :accept="videoEnabled ? 'image/*,video/*' : 'image/*'"
-        style="display:none"
-        @change="onFilesSelected"
-      />
     </header>
 
     <main>
+      <nav v-if="folder" class="breadcrumb" aria-label="Folder breadcrumb">
+        <button class="breadcrumb-item" @click="onSelectFolder('')">All photos</button>
+        <template v-for="(seg, i) in folderSegments" :key="i">
+          <span class="breadcrumb-sep" aria-hidden="true">›</span>
+          <button
+            class="breadcrumb-item"
+            :class="{ 'breadcrumb-current': i === folderSegments.length - 1 }"
+            :disabled="i === folderSegments.length - 1"
+            @click="onSelectFolder(folderSegments.slice(0, i + 1).join('/'))"
+          >{{ seg }}</button>
+        </template>
+      </nav>
+
       <GalleryGrid
         :images="images"
         :total="total"
@@ -62,6 +61,26 @@
         @deleted="onDeleted"
         @cropped="onCropped"
       />
+      <SideMenu
+        v-if="sideMenuOpen"
+        :folder="folder"
+        :video-enabled="videoEnabled"
+        @close="closeSideMenu"
+        @upload-files="onUploadFiles"
+        @select-folder="onSelectFolder"
+        @open-about="openAbout"
+      />
+      <AboutModal
+        v-if="aboutOpen"
+        :title="appTitle"
+        :title-icon="titleIcon"
+        :video-enabled="videoEnabled"
+        :build-number="buildNumber"
+        :image-count="imageCount"
+        :image-total-bytes="imageTotalBytes"
+        :disk-free-bytes="diskFreeBytes"
+        @close="closeAbout"
+      />
       <ShareUploader
         v-if="shareUploaderVisible"
         @done="onShareDone"
@@ -84,33 +103,42 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import GalleryGrid from './components/GalleryGrid.vue'
 import LightboxModal from './components/LightboxModal.vue'
 import ShareUploader from './components/ShareUploader.vue'
 import UploadDialog from './components/UploadDialog.vue'
 import PostUploadCropQueue from './components/PostUploadCropQueue.vue'
 import ViewModeToggle from './components/ViewModeToggle.vue'
+import SideMenu from './components/SideMenu.vue'
+import AboutModal from './components/AboutModal.vue'
 import { useGallery } from './composables/useGallery.js'
 
-const { images, total, loading, error, hasMore, viewMode, loadNextPage, setViewMode, removeImage, replaceImage, forceReload } = useGallery()
+const { images, total, loading, error, hasMore, viewMode, folder, loadNextPage, setViewMode, setFolder, removeImage, replaceImage, forceReload } = useGallery()
 
 const modalOpen = ref(false)
 const modalIndex = ref(0)
 const shareUploaderVisible = ref(false)
 const uploadFiles = ref(null)
 const cropQueue = ref(null)  // [{filename}] — shown after upload when non-null
+const sideMenuOpen = ref(false)
+const aboutOpen = ref(false)
 let savedScrollY = 0         // gallery scroll position saved when lightbox opens
+let pendingFolderClose = false // suppresses history.back() in closeSideMenu when the sidebar is closing due to a folder pick (URL already updated)
 const lightboxRef = ref(null)
-const fileInput = ref(null)
 const toasts = ref([])
 let toastSeq = 0
 const _storedCfg = (() => { try { return JSON.parse(localStorage.getItem('app-config') || 'null') } catch { return null } })()
 const videoEnabled = ref(_storedCfg?.videoEnabled ?? false)
 const titleIcon = ref(_storedCfg?.titleIcon ?? false)
+const buildNumber = ref(_storedCfg?.buildNumber ?? '')
+const imageCount = ref(_storedCfg?.imageCount ?? 0)
+const imageTotalBytes = ref(_storedCfg?.imageTotalBytes ?? 0)
+const diskFreeBytes = ref(_storedCfg?.diskFreeBytes ?? 0)
 
 const isVideo = (filename) => /\.(mp4|webm|mov|m4v)$/i.test(filename ?? '')
 const appTitle = ref(_storedCfg?.title || 'Photo Frame')
+const folderSegments = computed(() => folder.value ? folder.value.split('/') : [])
 
 function openModal(index) {
   savedScrollY = window.scrollY
@@ -130,7 +158,11 @@ function onPopState(e) {
   const modal = e.state?.modal ?? null
   if (modal !== null) return
 
-  if (modalOpen.value) {
+  if (aboutOpen.value) {
+    aboutOpen.value = false
+  } else if (sideMenuOpen.value) {
+    sideMenuOpen.value = false
+  } else if (modalOpen.value) {
     const cropResult = lightboxRef.value?.tryExitCrop()
     if (cropResult) {
       history.pushState({ modal: 'lightbox' }, '')
@@ -150,7 +182,48 @@ function onPopState(e) {
     url.searchParams.delete('share-pending')
     history.replaceState({ modal: null }, '', url)
     forceReload()
+  } else {
+    const m = window.location.pathname.match(/^\/folder\/(.+?)\/?$/)
+    const urlFolder = m ? decodeURI(m[1]) : ''
+    if (folder.value !== urlFolder) {
+      window.scrollTo(0, 0)
+      setFolder(urlFolder)
+    }
   }
+}
+
+function openSideMenu() {
+  sideMenuOpen.value = true
+  history.pushState({ modal: 'sidemenu' }, '')
+}
+
+function closeSideMenu() {
+  sideMenuOpen.value = false
+  if (pendingFolderClose) {
+    pendingFolderClose = false
+    return
+  }
+  if (history.state?.modal === 'sidemenu') history.back()
+}
+
+function openAbout() {
+  aboutOpen.value = true
+  history.pushState({ modal: 'about' }, '')
+}
+
+function closeAbout() {
+  aboutOpen.value = false
+  if (history.state?.modal === 'about') history.back()
+}
+
+function onSelectFolder(path) {
+  const target = path || ''
+  if (folder.value === target) return
+  const newPath = target ? '/folder/' + encodeURI(target) : '/'
+  history.replaceState({ modal: null }, '', newPath + window.location.search + window.location.hash)
+  if (sideMenuOpen.value) pendingFolderClose = true
+  window.scrollTo(0, 0)
+  setFolder(target)
 }
 
 function showToast(message) {
@@ -159,10 +232,8 @@ function showToast(message) {
   setTimeout(() => { toasts.value = toasts.value.filter(t => t.id !== id) }, 4000)
 }
 
-function onFilesSelected(e) {
-  const files = Array.from(e.target.files)
-  e.target.value = ''
-  if (files.length === 0) return
+function onUploadFiles(files) {
+  if (!files || files.length === 0) return
 
   const existingPaths = new Set(images.value.map(img => img.path))
   const duplicates = files.filter(f => existingPaths.has(f.name))
@@ -238,6 +309,10 @@ onMounted(() => {
       if (cfg.videoEnabled) videoEnabled.value = true
       if (cfg.bgColor) document.documentElement.style.setProperty('--bg-color', cfg.bgColor)
       titleIcon.value = cfg.titleIcon ?? false
+      buildNumber.value = cfg.buildNumber ?? ''
+      imageCount.value = cfg.imageCount ?? 0
+      imageTotalBytes.value = cfg.imageTotalBytes ?? 0
+      diskFreeBytes.value = cfg.diskFreeBytes ?? 0
     })
     .catch(() => {})
 
@@ -304,10 +379,30 @@ body {
   flex-shrink: 0;
 }
 
+.title-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  transition: all 0.15s;
+}
+.title-icon-btn:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.04);
+}
+
 .title-icon {
   width: 22px;
   height: 22px;
   opacity: 0.8;
+  display: block;
 }
 
 .sort-icon-btn {
@@ -327,22 +422,45 @@ body {
 .sort-icon-btn:hover { border-color: rgba(255,255,255,0.25); color: #ccc; }
 .sort-icon-btn.active { border-color: rgba(100,120,220,0.6); color: #c0caff; background: rgba(100,120,220,0.15); }
 
-.upload-icon-btn {
+/* ─── Breadcrumb ───────────────────────────────────────────────────── */
+.breadcrumb {
   display: flex;
   align-items: center;
-  justify-content: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: transparent;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 10px 4px 8px;
+  font-size: 0.85rem;
   color: #888;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: all 0.15s;
 }
-.upload-icon-btn svg { width: 18px; height: 18px; }
-.upload-icon-btn:hover { border-color: rgba(255,255,255,0.25); color: #ccc; }
+
+.breadcrumb-item {
+  background: transparent;
+  border: none;
+  color: #aab;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 5px;
+  font: inherit;
+  transition: background 0.12s, color 0.12s;
+}
+.breadcrumb-item:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+}
+.breadcrumb-item:disabled {
+  cursor: default;
+}
+
+.breadcrumb-current {
+  color: #fff;
+  font-weight: 500;
+}
+
+.breadcrumb-sep {
+  color: #555;
+  font-size: 0.95em;
+  user-select: none;
+}
 
 /* ─── Error notice ─────────────────────────────────────────────────── */
 .error-notice {
