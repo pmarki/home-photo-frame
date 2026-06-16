@@ -55,6 +55,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { lockBodyOverflow, unlockBodyOverflow } from '../composables/useBodyOverflowLock.js'
 
 const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
 
@@ -259,7 +260,7 @@ onMounted(() => {
   window.addEventListener('mouseup',   onGlobalMouseUp)
   window.addEventListener('touchmove', onGlobalTouchMove, { passive: false })
   window.addEventListener('touchend',  onGlobalTouchEnd)
-  document.body.style.overflow = 'hidden'
+  lockBodyOverflow()
 })
 
 onUnmounted(() => {
@@ -267,7 +268,7 @@ onUnmounted(() => {
   window.removeEventListener('mouseup',   onGlobalMouseUp)
   window.removeEventListener('touchmove', onGlobalTouchMove)
   window.removeEventListener('touchend',  onGlobalTouchEnd)
-  document.body.style.overflow = ''
+  unlockBodyOverflow()
 })
 </script>
 

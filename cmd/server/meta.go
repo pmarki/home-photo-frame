@@ -14,6 +14,12 @@ import (
 // filenameDate matches patterns like 20190318_132033 at the start of the base name.
 var filenameDate = regexp.MustCompile(`^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})`)
 
+// filenameDatePrefixed matches the common camera convention with a letter prefix,
+// e.g. IMG_20151008_115901371.jpg, VID_20190318_132033.mp4, PXL_20231115_180004.jpg.
+// The optional trailing digits (milliseconds on Android/Pixel) are tolerated by
+// the rest of the regex being unanchored at the end.
+var filenameDatePrefixed = regexp.MustCompile(`^[A-Za-z]+_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})`)
+
 // exifDate opens srcPath and returns DateTimeOriginal / DateTime from EXIF.
 // The file handle is closed via defer so an EXIF library panic does not leak it.
 func exifDate(srcPath string) (time.Time, bool) {
@@ -40,12 +46,15 @@ func extractBestDate(filename, srcPath string) time.Time {
 			return t
 		}
 	}
-	// 2. Filename pattern: YYYYMMDD_HHMMSS at start of base name
+	// 2. Filename patterns: YYYYMMDD_HHMMSS at start of base name, with or
+	// without a letter prefix (IMG_, VID_, PXL_, …).
 	base := strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filename))
-	if m := filenameDate.FindStringSubmatch(base); m != nil {
-		s := m[1] + m[2] + m[3] + m[4] + m[5] + m[6]
-		if t, err := time.ParseInLocation("20060102150405", s, time.Local); err == nil {
-			return t
+	for _, re := range []*regexp.Regexp{filenameDate, filenameDatePrefixed} {
+		if m := re.FindStringSubmatch(base); m != nil {
+			s := m[1] + m[2] + m[3] + m[4] + m[5] + m[6]
+			if t, err := time.ParseInLocation("20060102150405", s, time.Local); err == nil {
+				return t
+			}
 		}
 	}
 	// 3. File mtime

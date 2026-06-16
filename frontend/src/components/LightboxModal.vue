@@ -95,10 +95,15 @@
             @pointermove="onPanMove"
             @pointerup="onPanEnd"
             @pointercancel="onPanEnd"
+            @contextmenu="onLbContextMenu"
+            @touchstart.passive="onLbTouchStart"
+            @touchmove.passive="onLbTouchMove"
+            @touchend.passive="onLbTouchEnd"
+            @touchcancel.passive="onLbTouchEnd"
           >
             <video
               v-if="isVideo(currentImage.filename)"
-              :src="currentImage.original"
+              :src="lbVideoSrc"
               class="lb-image"
               :class="{ loaded: imgLoaded }"
               autoplay muted loop playsinline controls
@@ -108,7 +113,7 @@
             <img
               v-else
               ref="imgRef"
-              :src="currentImage.thumbMedium || currentImage.original"
+              :src="lbImageSrc"
               :alt="currentImage.filename"
               class="lb-image"
               :class="{ loaded: imgLoaded }"
@@ -119,7 +124,10 @@
           <div v-if="!imgLoaded && !imgError" class="lb-spinner-wrap" aria-hidden="true">
             <div class="spinner" />
           </div>
-          <div v-if="imgError" class="lb-error">Failed to load</div>
+          <div v-if="imgError" class="lb-error">
+            <span>Failed to load</span>
+            <button class="lb-error-retry" @click="retryImageLoad">Retry</button>
+          </div>
         </div>
       </transition>
 
@@ -153,6 +161,7 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import ImageCropper from './ImageCropper.vue'
+import { lockBodyOverflow, unlockBodyOverflow } from '../composables/useBodyOverflowLock.js'
 
 const props = defineProps({
   images:       { type: Array,   required: true },
@@ -160,13 +169,14 @@ const props = defineProps({
   hasMore:      { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['close', 'need-more', 'deleted', 'cropped'])
+const emit = defineEmits(['close', 'need-more', 'deleted', 'cropped', 'request-menu'])
 
 const stageRef     = ref(null)
 const imgRef       = ref(null)
 const currentIndex = ref(props.initialIndex)
 const imgLoaded    = ref(false)
 const imgError     = ref(false)
+const retryNonce   = ref(0)
 const transitionName = ref('slide-next')
 const sharing      = ref(false)
 const deleteArmed  = ref(false)
@@ -298,6 +308,72 @@ function onOverlayClick() {
   emit('close')
 }
 
+// ── Context menu (right-click / long-touch) on the lightbox image ──
+let lbPressTimer = null
+let lbPressStart = null
+let lbLastTapTime = 0
+const LB_LONG_PRESS_MS = 500
+const LB_LONG_PRESS_TOLERANCE = 10
+const LB_DOUBLE_TAP_MS = 300
+const LB_DOUBLE_TAP_TOLERANCE = 20
+
+function onLbContextMenu(e) {
+  e.preventDefault()
+  emit('request-menu', { image: currentImage.value, x: e.clientX, y: e.clientY })
+}
+
+function onLbTouchStart(e) {
+  if (e.touches.length !== 1) {
+    if (lbPressTimer) { clearTimeout(lbPressTimer); lbPressTimer = null }
+    return
+  }
+  const t = e.touches[0]
+  lbPressStart = { x: t.clientX, y: t.clientY }
+  if (lbPressTimer) clearTimeout(lbPressTimer)
+  lbPressTimer = setTimeout(() => {
+    lbPressTimer = null
+    if (!lbPressStart) return
+    emit('request-menu', { image: currentImage.value, x: lbPressStart.x, y: lbPressStart.y })
+    if (navigator.vibrate) try { navigator.vibrate(20) } catch {}
+  }, LB_LONG_PRESS_MS)
+}
+
+function onLbTouchMove(e) {
+  if (!lbPressTimer || !lbPressStart) return
+  const t = e.touches[0]
+  const dx = t.clientX - lbPressStart.x
+  const dy = t.clientY - lbPressStart.y
+  if (Math.hypot(dx, dy) > LB_LONG_PRESS_TOLERANCE) {
+    clearTimeout(lbPressTimer)
+    lbPressTimer = null
+  }
+}
+
+function onLbTouchEnd(e) {
+  if (lbPressTimer) {
+    clearTimeout(lbPressTimer)
+    lbPressTimer = null
+  }
+  // Double-tap → toggle zoom. Detected here on the element so it works even
+  // when the document-level touchend fires in an unexpected order on iOS.
+  if (lbPressStart && e && e.changedTouches && e.changedTouches[0] && !isVideo(currentImage.value.filename)) {
+    const t = e.changedTouches[0]
+    const dx = t.clientX - lbPressStart.x
+    const dy = t.clientY - lbPressStart.y
+    const now = Date.now()
+    if (Math.abs(dx) < LB_DOUBLE_TAP_TOLERANCE && Math.abs(dy) < LB_DOUBLE_TAP_TOLERANCE) {
+      if (now - lbLastTapTime < LB_DOUBLE_TAP_MS) {
+        toggleZoom(t.clientX, t.clientY)
+        lbLastTapTime = 0
+        lbPressStart = null
+        return
+      }
+      lbLastTapTime = now
+    }
+  }
+  lbPressStart = null
+}
+
 // Single action: share via Web Share API when possible, download otherwise
 async function shareOrDownload() {
   if (sharing.value) return
@@ -333,6 +409,23 @@ async function shareOrDownload() {
 
 const currentImage = computed(() => props.images[currentIndex.value] ?? { filename: '', path: '', modTime: null })
 
+// Lightbox image/video src with retry cache-buster — appended only after the
+// user clicks Retry on a failed load, to bypass the SW cache for that fetch.
+const lbImageSrc = computed(() => {
+  const url = currentImage.value.thumbMedium || currentImage.value.original
+  return retryNonce.value > 0 ? `${url}${url.includes('?') ? '&' : '?'}r=${retryNonce.value}` : url
+})
+const lbVideoSrc = computed(() => {
+  const url = currentImage.value.original
+  return retryNonce.value > 0 ? `${url}${url.includes('?') ? '&' : '?'}r=${retryNonce.value}` : url
+})
+
+function retryImageLoad() {
+  imgError.value = false
+  imgLoaded.value = false
+  retryNonce.value++
+}
+
 async function applyCrop(rect) {
   const imgPath = currentImage.value.path || currentImage.value.filename
   const encodedPath = imgPath.split('/').map(encodeURIComponent).join('/')
@@ -362,10 +455,18 @@ async function onDeleteClick() {
   }
   deleting.value = true
   const imgPath = currentImage.value.path || currentImage.value.filename
-  const encodedPath = imgPath.split('/').map(encodeURIComponent).join('/')
   try {
-    const res = await fetch(`/api/delete/${encodedPath}`, { method: 'DELETE' })
+    const res = await fetch('/api/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: [imgPath] }),
+    })
     if (!res.ok) throw new Error(`Server error ${res.status}`)
+    const data = await res.json()
+    if (!data.deleted?.includes(imgPath)) {
+      const reason = data.failed?.[0]?.error || 'Delete failed'
+      throw new Error(reason)
+    }
     // Clamp index before notifying parent so the lightbox shows the right image immediately
     const newLen = props.images.length - 1
     if (currentIndex.value >= newLen && newLen > 0) {
@@ -489,6 +590,7 @@ function folderOf(path) {
 watch(() => currentImage.value.filename, () => {
   imgLoaded.value = false
   imgError.value  = false
+  retryNonce.value = 0
 })
 
 defineExpose({
@@ -504,7 +606,7 @@ onMounted(() => {
   document.addEventListener('touchstart', onTouchStart, { passive: true })
   document.addEventListener('touchmove', onTouchMove, { passive: false })
   document.addEventListener('touchend', onTouchEnd, { passive: true })
-  document.body.style.overflow = 'hidden'
+  lockBodyOverflow()
 })
 
 onUnmounted(() => {
@@ -512,7 +614,7 @@ onUnmounted(() => {
   document.removeEventListener('touchstart', onTouchStart)
   document.removeEventListener('touchmove', onTouchMove)
   document.removeEventListener('touchend', onTouchEnd)
-  document.body.style.overflow = ''
+  unlockBodyOverflow()
 })
 </script>
 
@@ -656,6 +758,23 @@ onUnmounted(() => {
 .lb-error {
   color: #f87171;
   font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.lb-error-retry {
+  padding: 4px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.06);
+  color: #e0e0e8;
+  font: inherit;
+  font-size: 0.85rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.lb-error-retry:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.36);
 }
 
 /* ─── Navigation arrows ────────────────────────────────────────────── */

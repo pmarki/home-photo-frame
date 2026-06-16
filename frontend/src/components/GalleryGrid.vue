@@ -25,9 +25,20 @@
           class="gallery-item"
           role="listitem"
           :aria-label="img.filename"
-          :class="{ 'has-dims': img.width && img.height, 'img-loading': loadingSet.has(img.thumbSmall), 'img-error': errorSet.has(img.thumbSmall) }"
+          :class="{
+            'has-dims': img.width && img.height,
+            'img-loading': loadingSet.has(img.thumbSmall),
+            'img-error': errorSet.has(img.thumbSmall),
+            'tile-selected': selection.isSelected(img.path),
+            'select-mode': selection.selectMode.value,
+          }"
           :style="img.width && img.height ? { '--cover-scale': coverScale(img) } : {}"
-          @click="$emit('open', startIdx + i)"
+          @click="onTileClick(startIdx + i, img)"
+          @contextmenu="onTileContextMenu($event, img)"
+          @touchstart.passive="onTileTouchStart($event, img)"
+          @touchmove.passive="onTileTouchMove($event)"
+          @touchend.passive="onTileTouchEnd()"
+          @touchcancel.passive="onTileTouchEnd()"
         >
           <img
             v-lazy-src="img.thumbSmall"
@@ -98,6 +109,7 @@ import GalleryPlaceholder from './GalleryPlaceholder.vue'
 import YearScrollbar from './YearScrollbar.vue'
 import { useVirtualScroll } from '../composables/useVirtualScroll.js'
 import { useYearScrollbar } from '../composables/useYearScrollbar.js'
+import { useImageSelection } from '../composables/useImageSelection.js'
 
 const props = defineProps({
   images:   { type: Array,   required: true },
@@ -106,7 +118,9 @@ const props = defineProps({
   viewMode: { type: String,  default: 'gallery' },
 })
 
-const emit = defineEmits(['open'])
+const emit = defineEmits(['open', 'request-menu'])
+
+const selection = useImageSelection()
 
 const gridContainer = ref(null)
 const imagesRef = toRef(props, 'images')
@@ -186,6 +200,71 @@ function folderOf(path) {
   const slash = path.lastIndexOf('/')
   return slash < 0 ? '' : path.slice(0, slash)
 }
+
+// ── Context menu (right-click / long-touch) + select-mode click handling ──
+
+let pressTimer = null
+let pressStart = null
+let pressedImage = null
+let suppressClickUntil = 0
+const LONG_PRESS_MS = 500
+const LONG_PRESS_MOVE_TOLERANCE = 10
+
+function openMenu(image, x, y) {
+  emit('request-menu', { image, x, y })
+}
+
+function onTileContextMenu(e, image) {
+  e.preventDefault()
+  openMenu(image, e.clientX, e.clientY)
+}
+
+function onTileTouchStart(e, image) {
+  if (e.touches.length !== 1) return
+  const t = e.touches[0]
+  pressStart = { x: t.clientX, y: t.clientY }
+  pressedImage = image
+  if (pressTimer) clearTimeout(pressTimer)
+  pressTimer = setTimeout(() => {
+    pressTimer = null
+    if (!pressedImage) return
+    suppressClickUntil = Date.now() + 400
+    openMenu(pressedImage, pressStart.x, pressStart.y)
+    if (navigator.vibrate) try { navigator.vibrate(20) } catch {}
+  }, LONG_PRESS_MS)
+}
+
+function onTileTouchMove(e) {
+  if (!pressTimer || !pressStart) return
+  const t = e.touches[0]
+  const dx = t.clientX - pressStart.x
+  const dy = t.clientY - pressStart.y
+  if (Math.hypot(dx, dy) > LONG_PRESS_MOVE_TOLERANCE) {
+    clearTimeout(pressTimer)
+    pressTimer = null
+    pressedImage = null
+  }
+}
+
+function onTileTouchEnd() {
+  if (pressTimer) {
+    clearTimeout(pressTimer)
+    pressTimer = null
+  }
+  pressedImage = null
+}
+
+function onTileClick(index, image) {
+  if (Date.now() < suppressClickUntil) {
+    suppressClickUntil = 0
+    return
+  }
+  if (selection.selectMode.value) {
+    selection.togglePath(image.path)
+    return
+  }
+  emit('open', index)
+}
 </script>
 
 <style scoped>
@@ -237,6 +316,32 @@ function folderOf(path) {
   border: none;
   padding: 0;
   display: block;
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* ─── Selected state ───────────────────────────────────────────────── */
+.gallery-item.tile-selected::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 3px solid #6ee7b7;
+  border-radius: inherit;
+  z-index: 3;
+  pointer-events: none;
+}
+.gallery-item.tile-selected::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #6ee7b7 url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23072d23' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='4 12 10 18 20 6'/></svg>") center/14px no-repeat;
+  z-index: 3;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
 }
 
 .gallery-thumb {

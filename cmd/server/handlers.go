@@ -101,13 +101,18 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		handleChunkedUpload(w, r, id)
 		return
 	}
+	folder := r.FormValue("folder")
+	if folder != "" && !isValidPath(folder) {
+		http.Error(w, "invalid folder", http.StatusBadRequest)
+		return
+	}
 	src, header, err := r.FormFile("file")
 	if err != nil {
 		http.Error(w, "missing 'file' field", http.StatusBadRequest)
 		return
 	}
 	defer src.Close()
-	saveUploadedFile(w, src, header.Filename)
+	saveUploadedFile(w, src, header.Filename, folder)
 }
 
 func handleChunkedUpload(w http.ResponseWriter, r *http.Request, uploadID string) {
@@ -120,6 +125,11 @@ func handleChunkedUpload(w http.ResponseWriter, r *http.Request, uploadID string
 	filename := filepath.Base(r.FormValue("filename"))
 	if err1 != nil || err2 != nil || filename == "" || totalChunks < 1 || totalChunks > 10000 || chunkIndex < 0 || chunkIndex >= totalChunks {
 		http.Error(w, "invalid chunk parameters", http.StatusBadRequest)
+		return
+	}
+	folder := r.FormValue("folder")
+	if folder != "" && !isValidPath(folder) {
+		http.Error(w, "invalid folder", http.StatusBadRequest)
 		return
 	}
 
@@ -186,12 +196,12 @@ func handleChunkedUpload(w http.ResponseWriter, r *http.Request, uploadID string
 		http.Error(w, "seek failed", http.StatusInternalServerError)
 		return
 	}
-	saveUploadedFile(w, asm, filename)
+	saveUploadedFile(w, asm, filename, folder)
 	asm.Close()
 	os.RemoveAll(tmpDir)
 }
 
-func saveUploadedFile(w http.ResponseWriter, src io.Reader, originalName string) {
+func saveUploadedFile(w http.ResponseWriter, src io.Reader, originalName, folder string) {
 	ext := strings.ToLower(filepath.Ext(originalName))
 	if !supportedExts[ext] {
 		http.Error(w, "unsupported file type", http.StatusUnprocessableEntity)
@@ -202,11 +212,27 @@ func saveUploadedFile(w http.ResponseWriter, src io.Reader, originalName string)
 		http.Error(w, "invalid filename", http.StatusBadRequest)
 		return
 	}
-	destPath := filepath.Join(photosDir, safeName)
+	imgPath := safeName
+	if folder != "" {
+		imgPath = folder + "/" + safeName
+	}
+	destPath := filepath.Join(photosDir, filepath.FromSlash(imgPath))
+	// Defense in depth: ensure the resolved destination stays inside photosDir.
+	if rel, err := filepath.Rel(photosDir, destPath); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		http.Error(w, "destination outside photos directory", http.StatusBadRequest)
+		return
+	}
+	if folder != "" {
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+			log.Printf("upload: mkdir %s: %v", filepath.Dir(destPath), err)
+			http.Error(w, "failed to create folder", http.StatusInternalServerError)
+			return
+		}
+	}
 
 	// Hold the per-file mutex across the write + inline thumb + index so a
 	// concurrent thumbnail request can't open a half-written file.
-	rawMu, _ := fileMu.LoadOrStore(safeName, &sync.Mutex{})
+	rawMu, _ := fileMu.LoadOrStore(imgPath, &sync.Mutex{})
 	mu := rawMu.(*sync.Mutex)
 	mu.Lock()
 	defer mu.Unlock()
@@ -244,10 +270,12 @@ func saveUploadedFile(w http.ResponseWriter, src io.Reader, originalName string)
 			b := srcImg.Bounds()
 			imgW, imgH = b.Dx(), b.Dy()
 			thumb := imaging.Fit(srcImg, thumbnailSize, thumbnailSize, imaging.Lanczos)
-			cp := thumbSmallCachePath(safeName)
-			if f, err := os.Create(cp); err == nil {
-				jpeg.Encode(f, thumb, &jpeg.Options{Quality: 85}) //nolint:errcheck
-				f.Close()
+			cp := thumbSmallCachePath(imgPath)
+			if err := os.MkdirAll(filepath.Dir(cp), 0o755); err == nil {
+				if f, err := os.Create(cp); err == nil {
+					jpeg.Encode(f, thumb, &jpeg.Options{Quality: 85}) //nolint:errcheck
+					f.Close()
+				}
 			}
 			// Medium thumb from the same decoded image — avoids a second
 			// full decode on the first lightbox view.
@@ -255,27 +283,29 @@ func saveUploadedFile(w http.ResponseWriter, src io.Reader, originalName string)
 			if b.Dx() > mediumWidth {
 				mediumImg = imaging.Resize(srcImg, mediumWidth, 0, imaging.Lanczos)
 			}
-			mp := thumbMediumCachePath(safeName)
-			if f, err := os.Create(mp); err == nil {
-				jpeg.Encode(f, mediumImg, &jpeg.Options{Quality: 90}) //nolint:errcheck
-				f.Close()
+			mp := thumbMediumCachePath(imgPath)
+			if err := os.MkdirAll(filepath.Dir(mp), 0o755); err == nil {
+				if f, err := os.Create(mp); err == nil {
+					jpeg.Encode(f, mediumImg, &jpeg.Options{Quality: 90}) //nolint:errcheck
+					f.Close()
+				}
 			}
 		}
 	}
 
-	indexFileRecord(safeName, imgW, imgH)
+	indexFileRecord(imgPath, imgW, imgH)
 
 	fi, err := os.Stat(destPath)
 	if err != nil {
 		http.Error(w, "failed to stat uploaded file", http.StatusInternalServerError)
 		return
 	}
-	small, medium, original := thumbURLs(safeName, fi.ModTime())
+	small, medium, original := thumbURLs(imgPath, fi.ModTime())
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
 		"filename":    safeName,
-		"path":        safeName,
+		"path":        imgPath,
 		"thumbSmall":  small,
 		"thumbMedium": medium,
 		"original":    original,
@@ -313,31 +343,278 @@ func sweepOrphanedUploads() {
 }
 
 func handleDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
+	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	imgPath := strings.TrimPrefix(r.URL.Path, "/api/delete/")
-	if !isValidPath(imgPath) {
-		http.Error(w, "invalid path", http.StatusBadRequest)
+	var body struct {
+		Paths []string `json:"paths"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
-	srcPath := filepath.Join(photosDir, filepath.FromSlash(imgPath))
+	if len(body.Paths) == 0 {
+		http.Error(w, "no paths", http.StatusBadRequest)
+		return
+	}
 
-	if err := os.Remove(srcPath); err != nil {
-		if os.IsNotExist(err) {
-			http.Error(w, "not found", http.StatusNotFound)
-		} else {
-			http.Error(w, "failed to delete", http.StatusInternalServerError)
+	type failedItem struct {
+		Path  string `json:"path"`
+		Error string `json:"error"`
+	}
+	deleted := []string{}
+	failed := []failedItem{}
+
+	for _, imgPath := range body.Paths {
+		if !isValidPath(imgPath) {
+			failed = append(failed, failedItem{Path: imgPath, Error: "invalid path"})
+			continue
 		}
+		srcPath := filepath.Join(photosDir, filepath.FromSlash(imgPath))
+		if err := os.Remove(srcPath); err != nil {
+			if os.IsNotExist(err) {
+				failed = append(failed, failedItem{Path: imgPath, Error: "not found"})
+			} else {
+				log.Printf("delete: %s: %v", srcPath, err)
+				failed = append(failed, failedItem{Path: imgPath, Error: "delete failed"})
+			}
+			continue
+		}
+		os.Remove(thumbSmallCachePath(imgPath))
+		os.Remove(thumbMediumCachePath(imgPath))
+		fileMu.Delete(imgPath)
+		deleteFile(imgPath)
+		log.Printf("delete: %s", srcPath)
+		deleted = append(deleted, imgPath)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"deleted": deleted,
+		"failed":  failed,
+	})
+}
+
+// resolveMoveCopyDestination computes the destination path for a single source
+// in a move/copy operation, validates it, and returns the absolute and
+// relative target paths. Returns a non-empty error string when the operation
+// should be reported as failed for this item.
+func resolveMoveCopyDestination(src, destination string) (dstRel, dstAbs string, errMsg string) {
+	if !isValidPath(src) {
+		return "", "", "invalid path"
+	}
+	base := filepath.Base(src)
+	if destination == "" {
+		dstRel = base
+	} else {
+		dstRel = destination + "/" + base
+	}
+	if !isValidPath(dstRel) {
+		return "", "", "invalid destination"
+	}
+	if dstRel == src {
+		return "", "", "already at destination"
+	}
+	dstAbs = filepath.Join(photosDir, filepath.FromSlash(dstRel))
+	// Defense in depth: ensure the resolved absolute path stays inside photosDir.
+	// isValidPath already rejects ".." components in the user-supplied destination,
+	// but this guards against any future change to that helper, against
+	// platform-specific quirks in filepath.Join, and against accidental
+	// concatenation bugs.
+	rel, err := filepath.Rel(photosDir, dstAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", "", "destination outside photos directory"
+	}
+	return dstRel, dstAbs, ""
+}
+
+func handleMove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	os.Remove(thumbSmallCachePath(imgPath))
-	os.Remove(thumbMediumCachePath(imgPath))
-	fileMu.Delete(imgPath)
-	deleteFile(imgPath)
-	log.Printf("delete: %s", srcPath)
-	w.WriteHeader(http.StatusNoContent)
+	var body struct {
+		Paths       []string `json:"paths"`
+		Destination string   `json:"destination"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if len(body.Paths) == 0 {
+		http.Error(w, "no paths", http.StatusBadRequest)
+		return
+	}
+	if body.Destination != "" && !isValidPath(body.Destination) {
+		http.Error(w, "invalid destination", http.StatusBadRequest)
+		return
+	}
+
+	type movedItem struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	type failedItem struct {
+		Path  string `json:"path"`
+		Error string `json:"error"`
+	}
+	moved := []movedItem{}
+	failed := []failedItem{}
+
+	for _, src := range body.Paths {
+		dstRel, dstAbs, errMsg := resolveMoveCopyDestination(src, body.Destination)
+		if errMsg != "" {
+			failed = append(failed, failedItem{Path: src, Error: errMsg})
+			continue
+		}
+		srcAbs := filepath.Join(photosDir, filepath.FromSlash(src))
+		if _, err := os.Stat(srcAbs); err != nil {
+			if os.IsNotExist(err) {
+				failed = append(failed, failedItem{Path: src, Error: "not found"})
+			} else {
+				failed = append(failed, failedItem{Path: src, Error: "stat failed"})
+			}
+			continue
+		}
+		if _, err := os.Stat(dstAbs); err == nil {
+			failed = append(failed, failedItem{Path: src, Error: "destination exists"})
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(dstAbs), 0o755); err != nil {
+			log.Printf("move: mkdir %s: %v", filepath.Dir(dstAbs), err)
+			failed = append(failed, failedItem{Path: src, Error: "mkdir failed"})
+			continue
+		}
+		var srcW, srcH int
+		db.QueryRow(`SELECT width, height FROM files WHERE path = ?`, src).Scan(&srcW, &srcH) //nolint:errcheck
+		if err := os.Rename(srcAbs, dstAbs); err != nil {
+			log.Printf("move: rename %s -> %s: %v", srcAbs, dstAbs, err)
+			failed = append(failed, failedItem{Path: src, Error: "move failed"})
+			continue
+		}
+		// Update mtime so the file shows up as freshly added at the destination
+		// rather than at its original capture time.
+		now := time.Now()
+		os.Chtimes(dstAbs, now, now) //nolint:errcheck
+		os.Remove(thumbSmallCachePath(src))
+		os.Remove(thumbMediumCachePath(src))
+		fileMu.Delete(src)
+		deleteFile(src)
+		indexFileRecord(dstRel, srcW, srcH)
+		log.Printf("move: %s -> %s", src, dstRel)
+		moved = append(moved, movedItem{From: src, To: dstRel})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"moved":  moved,
+		"failed": failed,
+	})
+}
+
+func copyFile(srcAbs, dstAbs string) error {
+	s, err := os.Open(srcAbs)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	fi, err := s.Stat()
+	if err != nil {
+		return err
+	}
+	d, err := os.OpenFile(dstAbs, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fi.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(d, s); err != nil {
+		d.Close()
+		os.Remove(dstAbs)
+		return err
+	}
+	if err := d.Close(); err != nil {
+		os.Remove(dstAbs)
+		return err
+	}
+	// Leave mtime as the file-creation time (now) so the copy is treated as
+	// freshly added rather than carrying the original capture time.
+	return nil
+}
+
+func handleCopy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Paths       []string `json:"paths"`
+		Destination string   `json:"destination"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	if len(body.Paths) == 0 {
+		http.Error(w, "no paths", http.StatusBadRequest)
+		return
+	}
+	if body.Destination != "" && !isValidPath(body.Destination) {
+		http.Error(w, "invalid destination", http.StatusBadRequest)
+		return
+	}
+
+	type copiedItem struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	type failedItem struct {
+		Path  string `json:"path"`
+		Error string `json:"error"`
+	}
+	copied := []copiedItem{}
+	failed := []failedItem{}
+
+	for _, src := range body.Paths {
+		dstRel, dstAbs, errMsg := resolveMoveCopyDestination(src, body.Destination)
+		if errMsg != "" {
+			failed = append(failed, failedItem{Path: src, Error: errMsg})
+			continue
+		}
+		srcAbs := filepath.Join(photosDir, filepath.FromSlash(src))
+		if _, err := os.Stat(srcAbs); err != nil {
+			if os.IsNotExist(err) {
+				failed = append(failed, failedItem{Path: src, Error: "not found"})
+			} else {
+				failed = append(failed, failedItem{Path: src, Error: "stat failed"})
+			}
+			continue
+		}
+		if _, err := os.Stat(dstAbs); err == nil {
+			failed = append(failed, failedItem{Path: src, Error: "destination exists"})
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(dstAbs), 0o755); err != nil {
+			log.Printf("copy: mkdir %s: %v", filepath.Dir(dstAbs), err)
+			failed = append(failed, failedItem{Path: src, Error: "mkdir failed"})
+			continue
+		}
+		var srcW, srcH int
+		db.QueryRow(`SELECT width, height FROM files WHERE path = ?`, src).Scan(&srcW, &srcH) //nolint:errcheck
+		if err := copyFile(srcAbs, dstAbs); err != nil {
+			log.Printf("copy: %s -> %s: %v", srcAbs, dstAbs, err)
+			failed = append(failed, failedItem{Path: src, Error: "copy failed"})
+			continue
+		}
+		indexFileRecord(dstRel, srcW, srcH)
+		log.Printf("copy: %s -> %s", src, dstRel)
+		copied = append(copied, copiedItem{From: src, To: dstRel})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"copied": copied,
+		"failed": failed,
+	})
 }
 
 func handleCrop(w http.ResponseWriter, r *http.Request) {
@@ -455,7 +732,11 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleFolders(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query(`SELECT DISTINCT folder FROM files WHERE folder != '' ORDER BY folder`)
+	direction := "ASC"
+	if strings.EqualFold(r.URL.Query().Get("order"), "desc") {
+		direction = "DESC"
+	}
+	rows, err := db.Query(`SELECT DISTINCT folder FROM files WHERE folder != '' ORDER BY folder ` + direction)
 	if err != nil {
 		log.Printf("handleFolders: query error: %v", err)
 		http.Error(w, "query failed", http.StatusInternalServerError)

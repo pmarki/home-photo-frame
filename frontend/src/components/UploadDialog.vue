@@ -54,10 +54,12 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { lockBodyOverflow, unlockBodyOverflow } from '../composables/useBodyOverflowLock.js'
 
 const props = defineProps({
-  files: { type: Array, required: true } // Array of File objects
+  files: { type: Array, required: true }, // Array of File objects
+  destination: { type: String, default: '' }, // target folder relative to photos root
 })
 
 const emit = defineEmits(['done'])
@@ -85,7 +87,7 @@ const statusLine = computed(() => {
 
 const CHUNK_SIZE = 1.5 * 1024 * 1024  // 1.5 MB per chunk
 
-function sendChunk(chunk, uploadId, chunkIndex, totalChunks, filename, item) {
+function sendChunk(chunk, uploadId, chunkIndex, totalChunks, filename, item, folder) {
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest()
     const form = new FormData()
@@ -94,6 +96,7 @@ function sendChunk(chunk, uploadId, chunkIndex, totalChunks, filename, item) {
     form.append('chunkIndex', String(chunkIndex))
     form.append('totalChunks', String(totalChunks))
     form.append('filename', filename)
+    if (folder) form.append('folder', folder)
 
     xhr.upload.addEventListener('progress', (e) => {
       if (e.lengthComputable)
@@ -115,7 +118,7 @@ async function uploadFile(file, item) {
   for (let i = 0; i < totalChunks; i++) {
     const start = i * CHUNK_SIZE
     const chunk = file.slice(start, Math.min(start + CHUNK_SIZE, file.size))
-    const { status, body } = await sendChunk(chunk, uploadId, i, totalChunks, file.name, item)
+    const { status, body } = await sendChunk(chunk, uploadId, i, totalChunks, file.name, item, props.destination)
     lastBody = body
 
     if (status === 0) { item.state = 'error'; item.error = 'Network error'; return false }
@@ -186,7 +189,11 @@ function formatSize(bytes) {
   return (bytes / 1048576).toFixed(1) + ' MB'
 }
 
-onMounted(runUploads)
+onMounted(() => {
+  lockBodyOverflow()
+  runUploads()
+})
+onUnmounted(() => unlockBodyOverflow())
 </script>
 
 <style scoped>

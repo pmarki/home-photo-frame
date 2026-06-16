@@ -18,7 +18,7 @@
         {{ appTitle }}
       </h1>
 
-      <ViewModeToggle :mode="viewMode" @change="setViewMode" />
+      <ViewModeToggle class="header-view-mode" :mode="viewMode" @change="setViewMode" />
     </header>
 
     <main>
@@ -41,6 +41,7 @@
         :loading="loading"
         :viewMode="viewMode"
         @open="openModal"
+        @request-menu="onRequestMenu"
       />
 
       <div v-if="error" class="error-notice">
@@ -60,6 +61,7 @@
         @need-more="loadNextPage"
         @deleted="onDeleted"
         @cropped="onCropped"
+        @request-menu="onRequestMenu"
       />
       <SideMenu
         v-if="sideMenuOpen"
@@ -88,12 +90,40 @@
       <UploadDialog
         v-if="uploadFiles"
         :files="uploadFiles"
+        :destination="uploadDestination"
         @done="onUploadDone"
       />
       <PostUploadCropQueue
         v-if="cropQueue"
         :images="cropQueue"
         @done="onCropQueueDone"
+      />
+      <ImageContextMenu
+        v-if="contextMenu"
+        :x="contextMenu.x"
+        :y="contextMenu.y"
+        @close="contextMenu = null"
+        @open-new-tab="onMenuOpenNewTab"
+        @save="onMenuSave"
+        @share="onMenuShare"
+        @select="onMenuSelect"
+      />
+      <SelectionToolbar
+        v-if="selection.selectMode.value"
+        :count="selection.selectedPaths.value.size"
+        @cancel="selection.exitSelectMode()"
+        @share="onSelectionShare"
+        @delete="onSelectionDelete"
+        @copy="onSelectionCopy"
+        @move="onSelectionMove"
+      />
+      <FolderChooser
+        v-if="chooser"
+        :title="chooser.title"
+        :confirm-label="chooser.confirmLabel"
+        :initial-folder="chooser.initialFolder"
+        @close="chooser = null"
+        @confirm="onChooserConfirm"
       />
       <div class="toast-container">
         <div v-for="toast in toasts" :key="toast.id" class="toast">{{ toast.message }}</div>
@@ -112,7 +142,11 @@ import PostUploadCropQueue from './components/PostUploadCropQueue.vue'
 import ViewModeToggle from './components/ViewModeToggle.vue'
 import SideMenu from './components/SideMenu.vue'
 import AboutModal from './components/AboutModal.vue'
+import ImageContextMenu from './components/ImageContextMenu.vue'
+import SelectionToolbar from './components/SelectionToolbar.vue'
+import FolderChooser from './components/FolderChooser.vue'
 import { useGallery } from './composables/useGallery.js'
+import { useImageSelection } from './composables/useImageSelection.js'
 
 const { images, total, loading, error, hasMore, viewMode, folder, loadNextPage, setViewMode, setFolder, removeImage, replaceImage, forceReload } = useGallery()
 
@@ -123,6 +157,11 @@ const uploadFiles = ref(null)
 const cropQueue = ref(null)  // [{filename}] — shown after upload when non-null
 const sideMenuOpen = ref(false)
 const aboutOpen = ref(false)
+const contextMenu = ref(null) // { image, x, y } | null
+const chooser = ref(null) // { mode, title, confirmLabel, initialFolder, pendingFiles? } | null
+const uploadDestination = ref('')
+const selection = useImageSelection()
+const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function'
 let savedScrollY = 0         // gallery scroll position saved when lightbox opens
 let pendingFolderClose = false // suppresses history.back() in closeSideMenu when the sidebar is closing due to a folder pick (URL already updated)
 const lightboxRef = ref(null)
@@ -216,6 +255,129 @@ function closeAbout() {
   if (history.state?.modal === 'about') history.back()
 }
 
+function onRequestMenu(payload) {
+  contextMenu.value = payload
+}
+
+function onMenuOpenNewTab() {
+  if (!contextMenu.value) return
+  window.open(contextMenu.value.image.original, '_blank', 'noopener,noreferrer')
+  contextMenu.value = null
+}
+
+function onMenuSave() {
+  if (!contextMenu.value) return
+  const img = contextMenu.value.image
+  const a = document.createElement('a')
+  a.href = img.original
+  a.download = img.filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  contextMenu.value = null
+}
+
+async function onMenuShare() {
+  if (!contextMenu.value) return
+  const img = contextMenu.value.image
+  contextMenu.value = null
+  const absoluteUrl = window.location.origin + img.original
+  try {
+    if (canShare) {
+      const res = await fetch(img.original)
+      const blob = await res.blob()
+      const file = new File([blob], img.filename, { type: blob.type })
+      if (navigator.canShare?.({ files: [file] })) {
+        await navigator.share({ files: [file], title: img.filename })
+        return
+      }
+      await navigator.share({ title: img.filename, url: absoluteUrl })
+    } else {
+      await navigator.clipboard.writeText(absoluteUrl)
+      showToast('Link copied')
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') showToast('Share failed')
+  }
+}
+
+async function onSelectionDelete() {
+  const paths = Array.from(selection.selectedPaths.value)
+  if (paths.length === 0) return
+  const label = paths.length === 1 ? '1 photo' : paths.length + ' photos'
+  if (!window.confirm('Delete ' + label + '? This cannot be undone.')) return
+  try {
+    const res = await fetch('/api/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths }),
+    })
+    if (!res.ok) throw new Error('Server error ' + res.status)
+    const data = await res.json()
+    for (const p of data.deleted ?? []) removeImage(p)
+    selection.exitSelectMode()
+    const okCount = (data.deleted ?? []).length
+    const failCount = (data.failed ?? []).length
+    if (failCount === 0) showToast('Deleted ' + okCount)
+    else showToast('Deleted ' + okCount + ', ' + failCount + ' failed')
+  } catch (e) {
+    showToast('Delete failed')
+  }
+}
+
+async function onSelectionShare() {
+  const paths = Array.from(selection.selectedPaths.value)
+  if (paths.length === 0) return
+  const imgs = paths
+    .map(p => images.value.find(i => i.path === p))
+    .filter(Boolean)
+  if (imgs.length === 0) {
+    showToast('Share failed')
+    return
+  }
+  const urlList = imgs.map(i => window.location.origin + i.original).join('\n')
+  try {
+    if (canShare) {
+      const files = await Promise.all(imgs.map(async (img) => {
+        const res = await fetch(img.original)
+        const blob = await res.blob()
+        return new File([blob], img.filename, { type: blob.type })
+      }))
+      if (navigator.canShare?.({ files })) {
+        await navigator.share({ files, title: imgs.length + ' photos' })
+        return
+      }
+      await navigator.share({ title: imgs.length + ' photos', text: urlList })
+    } else {
+      await navigator.clipboard.writeText(urlList)
+      showToast(imgs.length === 1 ? 'Link copied' : imgs.length + ' links copied')
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') showToast('Share failed')
+  }
+}
+
+function onMenuSelect() {
+  if (!contextMenu.value) return
+  const img = contextMenu.value.image
+  contextMenu.value = null
+  if (modalOpen.value) {
+    modalOpen.value = false
+    if (history.state?.modal === 'lightbox') history.back()
+  }
+  selection.enterSelectMode(img.path)
+}
+
+function onGlobalKeydown(e) {
+  if (e.key !== 'Escape') return
+  if (contextMenu.value) return
+  if (modalOpen.value || sideMenuOpen.value || aboutOpen.value) return
+  if (selection.selectMode.value) {
+    e.stopPropagation()
+    selection.exitSelectMode()
+  }
+}
+
 function onSelectFolder(path) {
   const target = path || ''
   if (folder.value === target) return
@@ -234,21 +396,84 @@ function showToast(message) {
 
 function onUploadFiles(files) {
   if (!files || files.length === 0) return
-
-  const existingPaths = new Set(images.value.map(img => img.path))
-  const duplicates = files.filter(f => existingPaths.has(f.name))
-  const unique = files.filter(f => !existingPaths.has(f.name))
-
-  if (duplicates.length > 0) {
-    const label = duplicates.length === 1
-      ? `"${duplicates[0].name}" already exists`
-      : `${duplicates.length} files already exist`
-    showToast(label)
+  chooser.value = {
+    mode: 'upload',
+    title: 'Upload to…',
+    confirmLabel: 'Upload',
+    initialFolder: folder.value,
+    pendingFiles: files,
   }
+}
 
-  if (unique.length > 0) {
-    uploadFiles.value = unique
-    history.pushState({ modal: 'upload' }, '')
+function onSelectionCopy() {
+  if (selection.selectedPaths.value.size === 0) return
+  chooser.value = {
+    mode: 'copy',
+    title: 'Copy to…',
+    confirmLabel: 'Copy',
+    initialFolder: '',
+  }
+}
+
+function onSelectionMove() {
+  if (selection.selectedPaths.value.size === 0) return
+  chooser.value = {
+    mode: 'move',
+    title: 'Move to…',
+    confirmLabel: 'Move',
+    initialFolder: '',
+  }
+}
+
+async function onChooserConfirm(destination) {
+  const c = chooser.value
+  if (!c) return
+  chooser.value = null
+  if (c.mode === 'upload') {
+    const files = c.pendingFiles
+    const existingPaths = new Set(images.value.map(img => img.path))
+    const target = (name) => destination ? destination + '/' + name : name
+    const duplicates = files.filter(f => existingPaths.has(target(f.name)))
+    const unique = files.filter(f => !existingPaths.has(target(f.name)))
+    if (duplicates.length > 0) {
+      const label = duplicates.length === 1
+        ? `"${duplicates[0].name}" already exists`
+        : `${duplicates.length} files already exist`
+      showToast(label)
+    }
+    if (unique.length > 0) {
+      uploadDestination.value = destination
+      uploadFiles.value = unique
+      history.pushState({ modal: 'upload' }, '')
+    }
+  } else if (c.mode === 'copy' || c.mode === 'move') {
+    await performCopyMove(c.mode, destination)
+  }
+}
+
+async function performCopyMove(action, destination) {
+  const paths = Array.from(selection.selectedPaths.value)
+  if (paths.length === 0) return
+  try {
+    const res = await fetch('/api/' + action, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths, destination }),
+    })
+    if (!res.ok) throw new Error('Server error ' + res.status)
+    const data = await res.json()
+    const okList = action === 'copy' ? (data.copied ?? []) : (data.moved ?? [])
+    const failCount = (data.failed ?? []).length
+    if (action === 'move') {
+      for (const item of okList) removeImage(item.from)
+    }
+    selection.exitSelectMode()
+    forceReload()
+    const verb = action === 'copy' ? 'Copied' : 'Moved'
+    if (failCount === 0) showToast(verb + ' ' + okList.length)
+    else showToast(verb + ' ' + okList.length + ', ' + failCount + ' failed')
+  } catch (e) {
+    showToast(action === 'copy' ? 'Copy failed' : 'Move failed')
   }
 }
 
@@ -322,11 +547,13 @@ onMounted(() => {
     history.pushState({ modal: 'share-uploader' }, '')
   }
   window.addEventListener('popstate', onPopState)
+  window.addEventListener('keydown', onGlobalKeydown)
   loadNextPage()
 })
 
 onUnmounted(() => {
   window.removeEventListener('popstate', onPopState)
+  window.removeEventListener('keydown', onGlobalKeydown)
 })
 </script>
 
@@ -366,6 +593,10 @@ body {
   align-items: center;
   gap: 20px;
   flex-wrap: wrap;
+}
+
+.header-view-mode {
+  margin-left: auto;
 }
 
 .app-title {
@@ -495,7 +726,7 @@ body {
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  z-index: 9999;
+  z-index: 10800;
   pointer-events: none;
 }
 

@@ -99,6 +99,19 @@ registerRoute(
   })
 )
 
+// Folder list: same pattern — network-first with a short timeout so a stale
+// connection (e.g. after the tab returns from background) fails fast instead
+// of hanging the sidebar's loading state forever.
+registerRoute(
+  ({ url }) => url.pathname === '/api/folders',
+  new NetworkFirst({
+    cacheName: 'api-v1',
+    networkTimeoutSeconds: 5,
+    fetchOptions: { cache: 'no-store' },
+    plugins: [new CacheableResponsePlugin({ statuses: [0, 200] })]
+  })
+)
+
 // App config: stale-while-revalidate so offline/slow loads get cached values instantly
 registerRoute(
   ({ url }) => url.pathname === '/api/config',
@@ -108,10 +121,13 @@ registerRoute(
   })
 )
 
-// Originals: stale-while-revalidate (large files that rarely change)
+// Originals: cache-first. URLs are content-addressed (hash changes when the
+// file's mtime changes), so the cached response is always valid — no need
+// for SWR's background revalidation. Cache-first also means previously-viewed
+// images aren't blocked behind a stale network connection after tab wake.
 registerRoute(
   ({ url }) => url.pathname.startsWith('/api/original/'),
-  new StaleWhileRevalidate({
+  new CacheFirst({
     cacheName: 'originals-v1',
     plugins: [
       new ExpirationPlugin({ maxEntries: 100, maxAgeSeconds: 7 * 24 * 60 * 60 }),

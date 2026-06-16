@@ -130,6 +130,23 @@ func multipartFile(t *testing.T, filename string, data []byte) (body *bytes.Buff
 	return body, w.FormDataContentType()
 }
 
+// multipartFileWithFolder is like multipartFile but adds a "folder" form field.
+func multipartFileWithFolder(t *testing.T, filename string, data []byte, folder string) (body *bytes.Buffer, contentType string) {
+	t.Helper()
+	body = &bytes.Buffer{}
+	w := multipart.NewWriter(body)
+	if folder != "" {
+		w.WriteField("folder", folder) //nolint:errcheck
+	}
+	fw, err := w.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	fw.Write(data) //nolint:errcheck
+	w.Close()
+	return body, w.FormDataContentType()
+}
+
 // ── TestHandleConfig ──────────────────────────────────────────────────────
 
 func TestHandleConfig(t *testing.T) {
@@ -212,6 +229,39 @@ func TestHandleFolders(t *testing.T) {
 		}
 		if len(resp.Folders) != 0 {
 			t.Errorf("folders = %v, want empty", resp.Folders)
+		}
+	})
+
+	t.Run("returns folders in descending order when order=desc", func(t *testing.T) {
+		setupTestEnv(t)
+		now := time.Now().UnixNano()
+		rows := []struct{ path, folder string }{
+			{"alpha/a.jpg", "alpha"},
+			{"vacation/b.jpg", "vacation"},
+			{"family/c.jpg", "family"},
+		}
+		for _, r := range rows {
+			if _, err := db.Exec(
+				`INSERT INTO files (path,filename,folder,file_type,width,height,size,file_mtime,date_taken,indexed_at) VALUES (?,?,?,'image',0,0,0,?,?,?)`,
+				r.path, filepath.Base(r.path), r.folder, now, now, now,
+			); err != nil {
+				t.Fatalf("insert: %v", err)
+			}
+		}
+		rr := doRequest(handleFolders, http.MethodGet, "/api/folders?order=desc", nil, "")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rr.Code)
+		}
+		var resp struct{ Folders []string }
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		want := []string{"vacation", "family", "alpha"}
+		if len(resp.Folders) != len(want) {
+			t.Fatalf("folders = %v, want %v", resp.Folders, want)
+		}
+		for i, w := range want {
+			if resp.Folders[i] != w {
+				t.Errorf("folders[%d] = %q, want %q", i, resp.Folders[i], w)
+			}
 		}
 	})
 
@@ -436,18 +486,64 @@ func TestHandleUpload(t *testing.T) {
 			t.Errorf("status = %d, want 409", rr.Code)
 		}
 	})
+
+	t.Run("uploads into a folder, auto-creates the directory", func(t *testing.T) {
+		setupTestEnv(t)
+		body, ct := multipartFileWithFolder(t, "photo.jpg", makeTestJPEG(10, 10), "vacation/2026")
+		rr := doRequest(handleUpload, http.MethodPost, "/api/upload", body, ct)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+		}
+		var m map[string]string
+		json.NewDecoder(rr.Body).Decode(&m) //nolint:errcheck
+		if m["path"] != "vacation/2026/photo.jpg" {
+			t.Errorf("path = %q, want vacation/2026/photo.jpg", m["path"])
+		}
+		if _, err := os.Stat(filepath.Join(photosDir, "vacation", "2026", "photo.jpg")); err != nil {
+			t.Errorf("file not at expected location: %v", err)
+		}
+	})
+
+	t.Run("invalid folder returns 400", func(t *testing.T) {
+		setupTestEnv(t)
+		body, ct := multipartFileWithFolder(t, "photo.jpg", makeTestJPEG(10, 10), "../etc")
+		rr := doRequest(handleUpload, http.MethodPost, "/api/upload", body, ct)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400", rr.Code)
+		}
+	})
 }
 
 // ── TestHandleDelete ──────────────────────────────────────────────────────
 
 func TestHandleDelete(t *testing.T) {
+	type deleteResp struct {
+		Deleted []string `json:"deleted"`
+		Failed  []struct {
+			Path  string `json:"path"`
+			Error string `json:"error"`
+		} `json:"failed"`
+	}
+	postJSON := func(paths []string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{"paths": paths})
+		return doRequest(handleDelete, http.MethodPost, "/api/delete", bytes.NewReader(body), "application/json")
+	}
+
 	t.Run("deletes existing file", func(t *testing.T) {
 		setupTestEnv(t)
 		seedFile(t, "photo.jpg", makeTestJPEG(10, 10))
 
-		rr := doRequest(handleDelete, http.MethodDelete, "/api/delete/photo.jpg", nil, "")
-		if rr.Code != http.StatusNoContent {
-			t.Fatalf("status = %d, want 204; body: %s", rr.Code, rr.Body.String())
+		rr := postJSON([]string{"photo.jpg"})
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+		}
+		var resp deleteResp
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if len(resp.Deleted) != 1 || resp.Deleted[0] != "photo.jpg" {
+			t.Errorf("deleted = %v, want [photo.jpg]", resp.Deleted)
+		}
+		if len(resp.Failed) != 0 {
+			t.Errorf("failed = %v, want empty", resp.Failed)
 		}
 		if _, err := os.Stat(filepath.Join(photosDir, "photo.jpg")); !os.IsNotExist(err) {
 			t.Error("file still exists on disk after delete")
@@ -459,17 +555,62 @@ func TestHandleDelete(t *testing.T) {
 		}
 	})
 
-	t.Run("non-existent file returns 404", func(t *testing.T) {
+	t.Run("deletes multiple files; partial success reported", func(t *testing.T) {
 		setupTestEnv(t)
-		rr := doRequest(handleDelete, http.MethodDelete, "/api/delete/ghost.jpg", nil, "")
-		if rr.Code != http.StatusNotFound {
-			t.Errorf("status = %d, want 404", rr.Code)
+		seedFile(t, "a.jpg", makeTestJPEG(10, 10))
+		seedFile(t, "b.jpg", makeTestJPEG(10, 10))
+
+		rr := postJSON([]string{"a.jpg", "ghost.jpg", "b.jpg"})
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rr.Code)
+		}
+		var resp deleteResp
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if len(resp.Deleted) != 2 {
+			t.Errorf("deleted = %v, want 2 entries", resp.Deleted)
+		}
+		if len(resp.Failed) != 1 || resp.Failed[0].Path != "ghost.jpg" || resp.Failed[0].Error != "not found" {
+			t.Errorf("failed = %+v, want one ghost.jpg/not-found entry", resp.Failed)
 		}
 	})
 
-	t.Run("path traversal returns 400", func(t *testing.T) {
+	t.Run("non-existent file reported in failed", func(t *testing.T) {
 		setupTestEnv(t)
-		rr := doRequest(handleDelete, http.MethodDelete, "/api/delete/../etc/passwd", nil, "")
+		rr := postJSON([]string{"ghost.jpg"})
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rr.Code)
+		}
+		var resp deleteResp
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if len(resp.Failed) != 1 || resp.Failed[0].Error != "not found" {
+			t.Errorf("failed = %+v, want one not-found entry", resp.Failed)
+		}
+	})
+
+	t.Run("path traversal reported in failed", func(t *testing.T) {
+		setupTestEnv(t)
+		rr := postJSON([]string{"../etc/passwd"})
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rr.Code)
+		}
+		var resp deleteResp
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if len(resp.Failed) != 1 || resp.Failed[0].Error != "invalid path" {
+			t.Errorf("failed = %+v, want one invalid-path entry", resp.Failed)
+		}
+	})
+
+	t.Run("empty paths returns 400", func(t *testing.T) {
+		setupTestEnv(t)
+		rr := postJSON([]string{})
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400", rr.Code)
+		}
+	})
+
+	t.Run("invalid JSON returns 400", func(t *testing.T) {
+		setupTestEnv(t)
+		rr := doRequest(handleDelete, http.MethodPost, "/api/delete", bytes.NewReader([]byte("not json")), "application/json")
 		if rr.Code != http.StatusBadRequest {
 			t.Errorf("status = %d, want 400", rr.Code)
 		}
@@ -477,7 +618,282 @@ func TestHandleDelete(t *testing.T) {
 
 	t.Run("wrong method returns 405", func(t *testing.T) {
 		setupTestEnv(t)
-		rr := doRequest(handleDelete, http.MethodGet, "/api/delete/photo.jpg", nil, "")
+		rr := doRequest(handleDelete, http.MethodGet, "/api/delete", nil, "")
+		if rr.Code != http.StatusMethodNotAllowed {
+			t.Errorf("status = %d, want 405", rr.Code)
+		}
+	})
+}
+
+// ── TestHandleMove ────────────────────────────────────────────────────────
+
+func TestHandleMove(t *testing.T) {
+	type moveResp struct {
+		Moved []struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+		} `json:"moved"`
+		Failed []struct {
+			Path  string `json:"path"`
+			Error string `json:"error"`
+		} `json:"failed"`
+	}
+	postMove := func(paths []string, dest string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{"paths": paths, "destination": dest})
+		return doRequest(handleMove, http.MethodPost, "/api/move", bytes.NewReader(body), "application/json")
+	}
+
+	t.Run("moves file into existing destination folder", func(t *testing.T) {
+		setupTestEnv(t)
+		seedFile(t, "photo.jpg", makeTestJPEG(10, 10))
+		if err := os.MkdirAll(filepath.Join(photosDir, "vacation"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+
+		rr := postMove([]string{"photo.jpg"}, "vacation")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+		}
+		var resp moveResp
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if len(resp.Moved) != 1 || resp.Moved[0].To != "vacation/photo.jpg" {
+			t.Fatalf("moved = %+v", resp.Moved)
+		}
+		if _, err := os.Stat(filepath.Join(photosDir, "photo.jpg")); !os.IsNotExist(err) {
+			t.Error("source still exists on disk")
+		}
+		if _, err := os.Stat(filepath.Join(photosDir, "vacation", "photo.jpg")); err != nil {
+			t.Errorf("destination not present: %v", err)
+		}
+		var oldCount, newCount int
+		db.QueryRow(`SELECT COUNT(*) FROM files WHERE path='photo.jpg'`).Scan(&oldCount)         //nolint:errcheck
+		db.QueryRow(`SELECT COUNT(*) FROM files WHERE path='vacation/photo.jpg'`).Scan(&newCount) //nolint:errcheck
+		if oldCount != 0 || newCount != 1 {
+			t.Errorf("DB rows: old=%d new=%d, want 0 and 1", oldCount, newCount)
+		}
+	})
+
+	t.Run("creates destination folder if missing", func(t *testing.T) {
+		setupTestEnv(t)
+		seedFile(t, "photo.jpg", makeTestJPEG(10, 10))
+
+		rr := postMove([]string{"photo.jpg"}, "new/nested")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rr.Code)
+		}
+		var resp moveResp
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if len(resp.Moved) != 1 {
+			t.Fatalf("moved = %+v, failed = %+v", resp.Moved, resp.Failed)
+		}
+		if _, err := os.Stat(filepath.Join(photosDir, "new", "nested", "photo.jpg")); err != nil {
+			t.Errorf("destination not present: %v", err)
+		}
+	})
+
+	t.Run("updates mtime to now on move (does not preserve source mtime)", func(t *testing.T) {
+		setupTestEnv(t)
+		seedFile(t, "photo.jpg", makeTestJPEG(10, 10))
+		oldTime := time.Now().Add(-7 * 24 * time.Hour)
+		if err := os.Chtimes(filepath.Join(photosDir, "photo.jpg"), oldTime, oldTime); err != nil {
+			t.Fatalf("chtimes: %v", err)
+		}
+
+		rr := postMove([]string{"photo.jpg"}, "vacation")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rr.Code)
+		}
+		dstFi, err := os.Stat(filepath.Join(photosDir, "vacation", "photo.jpg"))
+		if err != nil {
+			t.Fatalf("dest stat: %v", err)
+		}
+		if !dstFi.ModTime().After(oldTime.Add(time.Hour)) {
+			t.Errorf("dest mtime = %v, want fresh (>> %v)", dstFi.ModTime(), oldTime)
+		}
+	})
+
+	t.Run("rejects overwrite when destination has existing file", func(t *testing.T) {
+		setupTestEnv(t)
+		seedFile(t, "photo.jpg", makeTestJPEG(10, 10))
+		if err := os.MkdirAll(filepath.Join(photosDir, "vacation"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		seedFile(t, "vacation/photo.jpg", makeTestJPEG(10, 10))
+
+		rr := postMove([]string{"photo.jpg"}, "vacation")
+		var resp moveResp
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if len(resp.Failed) != 1 || resp.Failed[0].Error != "destination exists" {
+			t.Errorf("failed = %+v, want destination-exists entry", resp.Failed)
+		}
+		if _, err := os.Stat(filepath.Join(photosDir, "photo.jpg")); err != nil {
+			t.Error("source should still exist after rejected move")
+		}
+	})
+
+	t.Run("rejects move into same folder", func(t *testing.T) {
+		setupTestEnv(t)
+		if err := os.MkdirAll(filepath.Join(photosDir, "vacation"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		seedFile(t, "vacation/photo.jpg", makeTestJPEG(10, 10))
+
+		rr := postMove([]string{"vacation/photo.jpg"}, "vacation")
+		var resp moveResp
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if len(resp.Failed) != 1 || resp.Failed[0].Error != "already at destination" {
+			t.Errorf("failed = %+v", resp.Failed)
+		}
+	})
+
+	t.Run("missing source reported in failed", func(t *testing.T) {
+		setupTestEnv(t)
+		rr := postMove([]string{"ghost.jpg"}, "vacation")
+		var resp moveResp
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if len(resp.Failed) != 1 || resp.Failed[0].Error != "not found" {
+			t.Errorf("failed = %+v", resp.Failed)
+		}
+	})
+
+	t.Run("path traversal in source reported in failed", func(t *testing.T) {
+		setupTestEnv(t)
+		rr := postMove([]string{"../etc/passwd"}, "vacation")
+		var resp moveResp
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if len(resp.Failed) != 1 || resp.Failed[0].Error != "invalid path" {
+			t.Errorf("failed = %+v", resp.Failed)
+		}
+	})
+
+	t.Run("invalid destination returns 400", func(t *testing.T) {
+		setupTestEnv(t)
+		seedFile(t, "photo.jpg", makeTestJPEG(10, 10))
+		body, _ := json.Marshal(map[string]any{"paths": []string{"photo.jpg"}, "destination": "../etc"})
+		rr := doRequest(handleMove, http.MethodPost, "/api/move", bytes.NewReader(body), "application/json")
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400", rr.Code)
+		}
+	})
+
+	t.Run("empty paths returns 400", func(t *testing.T) {
+		setupTestEnv(t)
+		body, _ := json.Marshal(map[string]any{"paths": []string{}, "destination": "vacation"})
+		rr := doRequest(handleMove, http.MethodPost, "/api/move", bytes.NewReader(body), "application/json")
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400", rr.Code)
+		}
+	})
+
+	t.Run("wrong method returns 405", func(t *testing.T) {
+		setupTestEnv(t)
+		rr := doRequest(handleMove, http.MethodGet, "/api/move", nil, "")
+		if rr.Code != http.StatusMethodNotAllowed {
+			t.Errorf("status = %d, want 405", rr.Code)
+		}
+	})
+}
+
+// ── TestHandleCopy ────────────────────────────────────────────────────────
+
+func TestHandleCopy(t *testing.T) {
+	type copyResp struct {
+		Copied []struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+		} `json:"copied"`
+		Failed []struct {
+			Path  string `json:"path"`
+			Error string `json:"error"`
+		} `json:"failed"`
+	}
+	postCopy := func(paths []string, dest string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{"paths": paths, "destination": dest})
+		return doRequest(handleCopy, http.MethodPost, "/api/copy", bytes.NewReader(body), "application/json")
+	}
+
+	t.Run("copies file to new folder preserving the original", func(t *testing.T) {
+		setupTestEnv(t)
+		seedFile(t, "photo.jpg", makeTestJPEG(10, 10))
+
+		rr := postCopy([]string{"photo.jpg"}, "vacation")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", rr.Code, rr.Body.String())
+		}
+		var resp copyResp
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if len(resp.Copied) != 1 || resp.Copied[0].To != "vacation/photo.jpg" {
+			t.Fatalf("copied = %+v", resp.Copied)
+		}
+		if _, err := os.Stat(filepath.Join(photosDir, "photo.jpg")); err != nil {
+			t.Error("source missing after copy")
+		}
+		if _, err := os.Stat(filepath.Join(photosDir, "vacation", "photo.jpg")); err != nil {
+			t.Errorf("destination not present: %v", err)
+		}
+		var oldCount, newCount int
+		db.QueryRow(`SELECT COUNT(*) FROM files WHERE path='photo.jpg'`).Scan(&oldCount)         //nolint:errcheck
+		db.QueryRow(`SELECT COUNT(*) FROM files WHERE path='vacation/photo.jpg'`).Scan(&newCount) //nolint:errcheck
+		if oldCount != 1 || newCount != 1 {
+			t.Errorf("DB rows: old=%d new=%d, want 1 and 1", oldCount, newCount)
+		}
+	})
+
+	t.Run("updates mtime to now on copy (does not preserve source mtime)", func(t *testing.T) {
+		setupTestEnv(t)
+		seedFile(t, "photo.jpg", makeTestJPEG(10, 10))
+		oldTime := time.Now().Add(-7 * 24 * time.Hour)
+		if err := os.Chtimes(filepath.Join(photosDir, "photo.jpg"), oldTime, oldTime); err != nil {
+			t.Fatalf("chtimes: %v", err)
+		}
+
+		rr := postCopy([]string{"photo.jpg"}, "dest")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rr.Code)
+		}
+		dstFi, err := os.Stat(filepath.Join(photosDir, "dest", "photo.jpg"))
+		if err != nil {
+			t.Fatalf("dest stat: %v", err)
+		}
+		if !dstFi.ModTime().After(oldTime.Add(time.Hour)) {
+			t.Errorf("dest mtime = %v, want fresh (>> %v)", dstFi.ModTime(), oldTime)
+		}
+	})
+
+	t.Run("rejects overwrite when destination has existing file", func(t *testing.T) {
+		setupTestEnv(t)
+		seedFile(t, "photo.jpg", makeTestJPEG(10, 10))
+		if err := os.MkdirAll(filepath.Join(photosDir, "vacation"), 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		seedFile(t, "vacation/photo.jpg", makeTestJPEG(10, 10))
+
+		rr := postCopy([]string{"photo.jpg"}, "vacation")
+		var resp copyResp
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if len(resp.Failed) != 1 || resp.Failed[0].Error != "destination exists" {
+			t.Errorf("failed = %+v", resp.Failed)
+		}
+	})
+
+	t.Run("partial success reports each item", func(t *testing.T) {
+		setupTestEnv(t)
+		seedFile(t, "a.jpg", makeTestJPEG(10, 10))
+
+		rr := postCopy([]string{"a.jpg", "ghost.jpg"}, "vacation")
+		var resp copyResp
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if len(resp.Copied) != 1 || resp.Copied[0].To != "vacation/a.jpg" {
+			t.Errorf("copied = %+v", resp.Copied)
+		}
+		if len(resp.Failed) != 1 || resp.Failed[0].Error != "not found" {
+			t.Errorf("failed = %+v", resp.Failed)
+		}
+	})
+
+	t.Run("wrong method returns 405", func(t *testing.T) {
+		setupTestEnv(t)
+		rr := doRequest(handleCopy, http.MethodGet, "/api/copy", nil, "")
 		if rr.Code != http.StatusMethodNotAllowed {
 			t.Errorf("status = %d, want 405", rr.Code)
 		}

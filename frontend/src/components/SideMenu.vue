@@ -51,7 +51,10 @@
         </button>
 
         <div v-if="loadingFolders" class="sm-folders-state">Loading…</div>
-        <div v-else-if="foldersError" class="sm-folders-state sm-folders-error">{{ foldersError }}</div>
+        <div v-else-if="foldersError" class="sm-folders-state sm-folders-error">
+          <span>{{ foldersError }}</span>
+          <button class="sm-folders-retry" @click="fetchFolders">Retry</button>
+        </div>
         <div v-else-if="tree.length === 0" class="sm-folders-state">No folders</div>
         <FolderTree
           v-else
@@ -76,7 +79,8 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount, onUnmounted, nextTick } from 'vue'
 import FolderTree from './FolderTree.vue'
-import { buildFolderTree } from '../composables/useFolderTree.js'
+import { buildFolderTree, FOLDER_ORDER } from '../composables/useFolderTree.js'
+import { lockBodyOverflow, unlockBodyOverflow } from '../composables/useBodyOverflowLock.js'
 
 // Module-level: persists between mounts of SideMenu so the folder list
 // remembers its scroll position across open/close cycles.
@@ -95,7 +99,6 @@ const foldersEl = ref(null)
 const tree = ref([])
 const loadingFolders = ref(true)
 const foldersError = ref(null)
-let prevBodyOverflow = ''
 let closeTimer = null
 
 function requestClose() {
@@ -125,15 +128,27 @@ function onKeydown(e) {
   }
 }
 
+let fetchController = null
+
 async function fetchFolders() {
+  if (fetchController) fetchController.abort()
+  fetchController = new AbortController()
+  const controller = fetchController
+  const timer = setTimeout(() => controller.abort(), 8000)
+
+  loadingFolders.value = true
+  foldersError.value = null
   try {
-    const res = await fetch('/api/folders')
+    const res = await fetch('/api/folders?order=' + FOLDER_ORDER, { signal: controller.signal })
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
-    tree.value = buildFolderTree(data.folders ?? [])
+    tree.value = buildFolderTree(data.folders ?? [], FOLDER_ORDER)
   } catch (e) {
-    foldersError.value = 'Failed to load folders'
+    if (e.name === 'AbortError') foldersError.value = 'Request timed out'
+    else foldersError.value = 'Failed to load folders'
   } finally {
+    clearTimeout(timer)
+    if (fetchController === controller) fetchController = null
     loadingFolders.value = false
     await nextTick()
     if (foldersEl.value) foldersEl.value.scrollTop = savedFoldersScrollTop
@@ -141,8 +156,7 @@ async function fetchFolders() {
 }
 
 onMounted(async () => {
-  prevBodyOverflow = document.body.style.overflow
-  document.body.style.overflow = 'hidden'
+  lockBodyOverflow()
   document.addEventListener('keydown', onKeydown)
   fetchFolders()
   await nextTick()
@@ -154,9 +168,10 @@ onBeforeUnmount(() => {
 })
 
 onUnmounted(() => {
-  document.body.style.overflow = prevBodyOverflow
+  unlockBodyOverflow()
   document.removeEventListener('keydown', onKeydown)
   if (closeTimer) clearTimeout(closeTimer)
+  if (fetchController) fetchController.abort()
 })
 </script>
 
@@ -294,6 +309,24 @@ onUnmounted(() => {
   padding: 12px 8px;
   font-size: 0.85rem;
   color: #888;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 .sm-folders-error { color: #f87171; }
+.sm-folders-retry {
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.04);
+  color: #e0e0e8;
+  font: inherit;
+  font-size: 0.8rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.sm-folders-retry:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.28);
+}
 </style>

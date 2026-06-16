@@ -1,4 +1,9 @@
-export function buildFolderTree(paths) {
+// Frontend default for folder ordering — fetch /api/folders with this value
+// and pass it to buildFolderTree so the inferred intermediate nodes and any
+// runtime-added nodes follow the same ordering the API returned.
+export const FOLDER_ORDER = 'desc'
+
+export function buildFolderTree(paths, order = FOLDER_ORDER) {
   const nodes = new Map()
 
   function ensure(fullPath) {
@@ -19,7 +24,8 @@ export function buildFolderTree(paths) {
     ensure(p)
   }
 
-  const cmp = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+  const direction = order === 'desc' ? -1 : 1
+  const cmp = (a, b) => direction * a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
   for (const node of nodes.values()) node.children.sort(cmp)
 
   const roots = []

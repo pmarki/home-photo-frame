@@ -50,6 +50,7 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { lockBodyOverflow, unlockBodyOverflow } from '../composables/useBodyOverflowLock.js'
 
 defineProps({
   title: { type: String, required: true },
@@ -73,7 +74,6 @@ function formatBytes(bytes) {
 const emit = defineEmits(['close'])
 
 const visible = ref(false)
-let prevBodyOverflow = ''
 let closeTimer = null
 
 function requestClose() {
@@ -91,15 +91,14 @@ function onKeydown(e) {
 }
 
 onMounted(async () => {
-  prevBodyOverflow = document.body.style.overflow
-  document.body.style.overflow = 'hidden'
+  lockBodyOverflow()
   document.addEventListener('keydown', onKeydown)
   await nextTick()
   requestAnimationFrame(() => { visible.value = true })
 })
 
 onUnmounted(() => {
-  document.body.style.overflow = prevBodyOverflow
+  unlockBodyOverflow()
   document.removeEventListener('keydown', onKeydown)
   if (closeTimer) clearTimeout(closeTimer)
 })

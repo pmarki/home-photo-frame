@@ -51,7 +51,8 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { lockBodyOverflow, unlockBodyOverflow } from '../composables/useBodyOverflowLock.js'
 
 const emit = defineEmits(['done'])
 
@@ -206,6 +207,7 @@ function formatSize(bytes) {
 }
 
 onMounted(async () => {
+  lockBodyOverflow()
   const files = await readPendingFiles()
   if (files.length === 0) {
     // Nothing in cache — maybe a stale ?share-pending param; dismiss
@@ -214,6 +216,7 @@ onMounted(async () => {
   }
   await runUploads(files)
 })
+onUnmounted(() => unlockBodyOverflow())
 </script>
 
 <style scoped>
@@ -221,7 +224,7 @@ onMounted(async () => {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.7);
-  z-index: 9000;
+  z-index: 9100;
   display: flex;
   align-items: flex-end;
   justify-content: center;

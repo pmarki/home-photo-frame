@@ -95,7 +95,7 @@ function onPointerUp() {
   right: 0;
   top: v-bind(topOffset);
   bottom: 0;
-  width: 44px;
+  width: 28px;
   pointer-events: none;
   z-index: 50;
 }
