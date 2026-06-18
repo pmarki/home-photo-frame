@@ -21,6 +21,13 @@
         </div>
       </div>
       <div class="year-handle" :style="{ '--hpos': handlePos }" />
+      <div
+        v-if="tooltipText"
+        class="year-tooltip"
+        :style="{ '--ty': tooltipY + 'px' }"
+      >
+        {{ tooltipText }}
+      </div>
     </div>
   </Teleport>
 </template>
@@ -29,15 +36,18 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 
 const props = defineProps({
-  yearItems:   { type: Array,   required: true },
-  currentYear: { type: Number,  default: null },
-  visible:     { type: Boolean, default: false },
-  handlePos:   { type: Number,  default: 0 },
-  maxScrollY:  { type: Number,  default: 0 },
+  yearItems:     { type: Array,    required: true },
+  currentYear:   { type: Number,   default: null },
+  visible:       { type: Boolean,  default: false },
+  handlePos:     { type: Number,   default: 0 },
+  maxScrollY:    { type: Number,   default: 0 },
+  getMonthLabel: { type: Function, required: true },
 })
 
 const barRef = ref(null)
 const isDragging = ref(false)
+const tooltipText = ref(null)
+const tooltipY = ref(0)
 const headerHeight = ref(0)
 const topOffset = computed(() => headerHeight.value + 'px')
 
@@ -73,19 +83,29 @@ function scrollToY(e) {
   window.scrollTo(0, (relY / rect.height) * props.maxScrollY)
 }
 
+function updateTooltip(e) {
+  const rect = barRef.value.getBoundingClientRect()
+  const relY = Math.max(0, Math.min(rect.height, e.clientY - rect.top))
+  tooltipY.value = relY
+  tooltipText.value = props.getMonthLabel((relY / rect.height) * props.maxScrollY)
+}
+
 function onPointerDown(e) {
   isDragging.value = true
   barRef.value.setPointerCapture(e.pointerId)
   scrollToY(e)
+  updateTooltip(e)
 }
 
 function onPointerMove(e) {
   if (!isDragging.value) return
   scrollToY(e)
+  updateTooltip(e)
 }
 
 function onPointerUp() {
   isDragging.value = false
+  tooltipText.value = null
 }
 </script>
 
@@ -173,6 +193,23 @@ function onPointerUp() {
 
 .year-scrollbar.is-touch .year-handle {
   display: block;
+}
+
+.year-tooltip {
+  position: absolute;
+  right: 32px;
+  top: var(--ty, 0);
+  transform: translateY(-50%);
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: 5px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 
 .year-scrollbar.active .year-handle {

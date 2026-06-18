@@ -20,6 +20,12 @@ var filenameDate = regexp.MustCompile(`^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{
 // the rest of the regex being unanchored at the end.
 var filenameDatePrefixed = regexp.MustCompile(`^[A-Za-z]+_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})`)
 
+// filenameDateWhatsApp matches WhatsApp's media naming, e.g. IMG-20240101-WA0001.jpg
+// or VID-20240101-WA0001.mp4. WhatsApp filenames carry only the date — no time —
+// so this pattern produces 3 capture groups instead of 6; the time defaults to
+// midnight when this pattern is the source of the date.
+var filenameDateWhatsApp = regexp.MustCompile(`^[A-Za-z]+-(\d{4})(\d{2})(\d{2})-WA\d+`)
+
 // exifDate opens srcPath and returns DateTimeOriginal / DateTime from EXIF.
 // The file handle is closed via defer so an EXIF library panic does not leak it.
 func exifDate(srcPath string) (time.Time, bool) {
@@ -46,12 +52,18 @@ func extractBestDate(filename, srcPath string) time.Time {
 			return t
 		}
 	}
-	// 2. Filename patterns: YYYYMMDD_HHMMSS at start of base name, with or
-	// without a letter prefix (IMG_, VID_, PXL_, …).
+	// 2. Filename patterns: YYYYMMDD_HHMMSS at start of base name (with or
+	// without a letter prefix like IMG_, VID_, PXL_), plus WhatsApp's
+	// IMG-YYYYMMDD-WAxxxx convention which has no time component.
 	base := strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filename))
-	for _, re := range []*regexp.Regexp{filenameDate, filenameDatePrefixed} {
+	for _, re := range []*regexp.Regexp{filenameDate, filenameDatePrefixed, filenameDateWhatsApp} {
 		if m := re.FindStringSubmatch(base); m != nil {
-			s := m[1] + m[2] + m[3] + m[4] + m[5] + m[6]
+			var s string
+			if len(m) >= 7 {
+				s = m[1] + m[2] + m[3] + m[4] + m[5] + m[6]
+			} else {
+				s = m[1] + m[2] + m[3] + "000000"
+			}
 			if t, err := time.ParseInLocation("20060102150405", s, time.Local); err == nil {
 				return t
 			}

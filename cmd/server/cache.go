@@ -16,7 +16,7 @@ type ImageInfo struct {
 	Filename    string    `json:"filename"`
 	Path        string    `json:"path"`
 	ModTime     time.Time `json:"modTime"`   // best date: EXIF → filename pattern → mtime
-	FileMtime   time.Time `json:"-"`         // OS mtime, used for "date modified" sort
+	FileMtime   time.Time `json:"fileMtime"` // OS mtime, used for "date modified" sort
 	Size        int64     `json:"size"`
 	Width       int       `json:"width,omitempty"`
 	Height      int       `json:"height,omitempty"`

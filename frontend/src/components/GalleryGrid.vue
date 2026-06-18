@@ -94,17 +94,18 @@
   </div>
 
   <YearScrollbar
-    v-if="viewMode === 'gallery'"
+    v-if="viewMode === 'gallery' || viewMode === 'timeline'"
     :yearItems="yearItems"
     :currentYear="currentYear"
     :visible="yearVisible"
     :handlePos="handlePos"
     :maxScrollY="maxScrollY"
+    :getMonthLabel="getMonthLabel"
   />
 </template>
 
 <script setup>
-import { ref, toRef, reactive, watch } from 'vue'
+import { ref, toRef, reactive, computed, watch } from 'vue'
 import GalleryPlaceholder from './GalleryPlaceholder.vue'
 import YearScrollbar from './YearScrollbar.vue'
 import { useVirtualScroll } from '../composables/useVirtualScroll.js'
@@ -133,13 +134,16 @@ const { topSpacer, bottomSpacer, visibleItems, startIdx, columnCount, rowHeight,
 
 watch(() => props.viewMode, () => refreshMetrics())
 
-const { yearItems, currentYear, visible: yearVisible, handlePos, maxScrollY } = useYearScrollbar({
+const yearDateField = computed(() => props.viewMode === 'timeline' ? 'fileMtime' : 'modTime')
+
+const { yearItems, currentYear, visible: yearVisible, handlePos, maxScrollY, getMonthLabel } = useYearScrollbar({
   images: imagesRef,
   scrollY,
   rowHeight,
   columnCount,
   totalRows,
   viewportHeight,
+  dateField: yearDateField,
 })
 
 const loadingSet = reactive(new Set())

@@ -105,6 +105,58 @@ func TestFilenameDatePrefixedRegex(t *testing.T) {
 	}
 }
 
+func TestFilenameDateWhatsAppRegex(t *testing.T) {
+	tests := []struct {
+		input   string
+		matches bool
+		year    string
+	}{
+		{"IMG-20240101-WA0001", true, "2024"},
+		{"IMG-20240101-WA0001.jpg", true, "2024"},
+		{"VID-20240101-WA0001.mp4", true, "2024"},
+		{"IMG-20151008-WA9999.jpeg", true, "2015"},
+		{"IMG-20240101-foo.jpg", false, ""},     // no WA suffix
+		{"20240101-WA0001.jpg", false, ""},      // missing letter prefix
+		{"IMG_20240101_WA0001.jpg", false, ""},  // underscores, not hyphens
+		{"IMG-2024-WA0001.jpg", false, ""},      // date too short
+		{"IMG-20240101-WA.jpg", false, ""},      // missing serial digits
+	}
+	for _, tc := range tests {
+		m := filenameDateWhatsApp.FindStringSubmatch(tc.input)
+		if tc.matches {
+			if m == nil {
+				t.Errorf("filenameDateWhatsApp.FindStringSubmatch(%q) = nil, want match", tc.input)
+				continue
+			}
+			if m[1] != tc.year {
+				t.Errorf("filenameDateWhatsApp.FindStringSubmatch(%q) year = %q, want %q", tc.input, m[1], tc.year)
+			}
+		} else {
+			if m != nil {
+				t.Errorf("filenameDateWhatsApp.FindStringSubmatch(%q) = %v, want nil", tc.input, m)
+			}
+		}
+	}
+}
+
+func TestExtractBestDateFromWhatsAppFilename(t *testing.T) {
+	setupTestEnv(t)
+	name := "IMG-20240315-WA0042.jpg"
+	dst := filepath.Join(photosDir, name)
+	if err := os.WriteFile(dst, makeTestJPEG(10, 10), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := extractBestDate(name, dst)
+	if got.Year() != 2024 || got.Month() != time.March || got.Day() != 15 {
+		t.Errorf("extractBestDate(%q) = %v, want 2024-03-15", name, got)
+	}
+	// WhatsApp filenames carry no time; we default to midnight.
+	if got.Hour() != 0 || got.Minute() != 0 || got.Second() != 0 {
+		t.Errorf("extractBestDate(%q) time = %02d:%02d:%02d, want 00:00:00",
+			name, got.Hour(), got.Minute(), got.Second())
+	}
+}
+
 func TestExtractBestDateFromPrefixedFilename(t *testing.T) {
 	setupTestEnv(t)
 	// File with no EXIF; extractBestDate should fall back to the filename pattern.

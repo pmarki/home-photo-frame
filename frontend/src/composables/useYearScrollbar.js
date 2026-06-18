@@ -1,15 +1,18 @@
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, isRef, watch, onMounted, onUnmounted } from 'vue'
 
 const HIDE_DELAY_MS = 1500
 
-export function useYearScrollbar({ images, scrollY, rowHeight, columnCount, totalRows, viewportHeight }) {
+export function useYearScrollbar({ images, scrollY, rowHeight, columnCount, totalRows, viewportHeight, dateField }) {
   const visible = ref(false)
   let hideTimer = null
   let maxRafId = null
 
+  const fieldRef = isRef(dateField) ? dateField : ref(dateField ?? 'modTime')
+
   function getYear(img) {
-    if (!img?.modTime) return null
-    return new Date(img.modTime).getFullYear()
+    const v = img?.[fieldRef.value]
+    if (!v) return null
+    return new Date(v).getFullYear()
   }
 
   // Shape-based cache: the images array is sorted, so (length, first, last)
@@ -19,6 +22,8 @@ export function useYearScrollbar({ images, scrollY, rowHeight, columnCount, tota
   let cachedShape = null
   let cachedYearMap = new Map()
   let cachedResult = []
+
+  watch(fieldRef, () => { cachedShape = null })
 
   function extendYearMap(imgs, fromIdx) {
     for (let i = fromIdx; i < imgs.length; i++) {
@@ -149,10 +154,22 @@ export function useYearScrollbar({ images, scrollY, rowHeight, columnCount, tota
     return max > 0 ? Math.min(1, scrollY.value / max) : 0
   })
 
+  function getMonthLabel(absScrollY) {
+    const rh = rowHeight.value
+    const cols = Math.max(1, columnCount.value)
+    const imgs = images.value
+    if (!rh || imgs.length === 0) return null
+    const row = Math.max(0, Math.floor(absScrollY / rh))
+    const idx = Math.min(imgs.length - 1, row * cols)
+    const v = imgs[idx]?.[fieldRef.value]
+    if (!v) return null
+    return new Date(v).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })
+  }
+
   onUnmounted(() => {
     clearTimeout(hideTimer)
     if (maxRafId) cancelAnimationFrame(maxRafId)
   })
 
-  return { yearItems: displayItems, currentYear, visible, handlePos, maxScrollY }
+  return { yearItems: displayItems, currentYear, visible, handlePos, maxScrollY, getMonthLabel }
 }

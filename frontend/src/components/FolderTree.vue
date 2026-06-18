@@ -37,14 +37,45 @@
   </ul>
 </template>
 
+<script>
+// Module-level (runs once, NOT per-instance like <script setup>).
+// All FolderTree instances share this same reactive object so a toggle at
+// any depth is visible to siblings and parents, and the persisted localStorage
+// blob always reflects the full set of overrides.
+import { reactive, watch } from 'vue'
+
+const STORAGE_KEY = 'folderTree.overrides'
+
+function loadOverrides() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return {}
+    const obj = JSON.parse(raw)
+    if (!obj || typeof obj !== 'object') return {}
+    const out = {}
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v === 'boolean') out[k] = v
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+const overrides = reactive(loadOverrides())
+
+watch(overrides, (state) => {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+  } catch {
+    // storage full or unavailable — silently degrade to in-memory only
+  }
+}, { deep: true, flush: 'post' })
+
+</script>
+
 <script setup>
-import { ref } from 'vue'
-
 defineOptions({ name: 'FolderTree' })
-
-// Module-level: shared across all FolderTree instances and persisted between
-// SideMenu open/close cycles. Keyed by full folder path (globally unique).
-const overrides = ref(new Map())
 
 const props = defineProps({
   nodes: { type: Array, required: true },
@@ -56,15 +87,13 @@ const props = defineProps({
 defineEmits(['select'])
 
 function isExpanded(node) {
-  if (overrides.value.has(node.path)) return overrides.value.get(node.path)
+  const v = overrides[node.path]
+  if (typeof v === 'boolean') return v
   return props.depth < props.autoExpandDepth
 }
 
 function toggle(node) {
-  const next = !isExpanded(node)
-  const map = new Map(overrides.value)
-  map.set(node.path, next)
-  overrides.value = map
+  overrides[node.path] = !isExpanded(node)
 }
 </script>
 
