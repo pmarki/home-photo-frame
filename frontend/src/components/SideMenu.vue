@@ -77,10 +77,11 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, onUnmounted, nextTick } from 'vue'
+import { ref, onMounted, onBeforeUnmount, onUnmounted, nextTick, watch } from 'vue'
 import FolderTree from './FolderTree.vue'
 import { buildFolderTree, FOLDER_ORDER } from '../composables/useFolderTree.js'
 import { lockBodyOverflow, unlockBodyOverflow } from '../composables/useBodyOverflowLock.js'
+import { useUser } from '../composables/useUser.js'
 
 // Module-level: persists between mounts of SideMenu so the folder list
 // remembers its scroll position across open/close cycles.
@@ -154,6 +155,11 @@ async function fetchFolders() {
     if (foldersEl.value) foldersEl.value.scrollTop = savedFoldersScrollTop
   }
 }
+
+const { userId } = useUser()
+watch(userId, (id) => {
+  if (id) fetchFolders()
+})
 
 onMounted(async () => {
   lockBodyOverflow()

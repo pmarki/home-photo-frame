@@ -30,6 +30,7 @@ var (
 	videoEnabled bool
 	bgColor      string
 	iconsDir     string
+	configPath   string
 )
 
 var frontendFS fs.FS
@@ -63,7 +64,18 @@ func main() {
 	flag.BoolVar(&videoEnabled, "video", videoDefault, "enable mp4 video upload and thumbnails; requires ffmpeg (env: VIDEO=1)")
 	flag.StringVar(&bgColor, "bg-color", envOr("BG_COLOR", "#0a0a0f"), "primary background hex colour (env: BG_COLOR)")
 	flag.StringVar(&iconsDir, "icons-dir", envOr("ICONS_DIR", ""), "directory with custom icon files; falls back to embedded (env: ICONS_DIR)")
+	flag.StringVar(&configPath, "config", envOr("CONFIG_FILE", "./config.yaml"), "path to YAML config file with users and folder assignments (env: CONFIG_FILE)")
 	flag.Parse()
+
+	if _, err := loadConfig(configPath); err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	log.Printf("config : %s", configPath)
+	if appConfig == nil {
+		log.Printf("users  : (none — users feature disabled)")
+	} else {
+		log.Printf("users  : %d configured", len(appConfig.Users))
+	}
 
 	if !isValidHexColor(bgColor) {
 		log.Printf("warning: invalid BG_COLOR %q, falling back to #0a0a0f", bgColor)
@@ -147,6 +159,7 @@ func main() {
 	mux.HandleFunc("/api/images", handleImages)
 	mux.HandleFunc("/api/folders", handleFolders)
 	mux.HandleFunc("/api/config", handleConfig)
+	mux.HandleFunc("/api/users", handleUsers)
 	mux.HandleFunc("/api/thumb/", handleThumb)
 	mux.HandleFunc("/api/thumb-medium/", handleThumbMedium)
 	mux.HandleFunc("/api/original/", handleOriginal)
@@ -166,7 +179,7 @@ func main() {
 	log.Printf("listening on %s", addr)
 	srv := &http.Server{
 		Addr:         addr,
-		Handler:      corsMiddleware(recoveryMiddleware(mux)),
+		Handler:      corsMiddleware(recoveryMiddleware(authMiddleware(mux))),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,

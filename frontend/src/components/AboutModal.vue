@@ -44,6 +44,9 @@
           <dd>{{ formatBytes(diskFreeBytes) }}</dd>
         </div>
       </dl>
+      <button v-if="userName" class="ab-logout" @click="onLogout">
+        Log out {{ userName }}
+      </button>
     </div>
   </div>
 </template>
@@ -60,6 +63,7 @@ defineProps({
   imageCount: { type: Number, default: 0 },
   imageTotalBytes: { type: Number, default: 0 },
   diskFreeBytes: { type: Number, default: 0 },
+  userName: { type: String, default: '' },
 })
 
 function formatBytes(bytes) {
@@ -71,7 +75,7 @@ function formatBytes(bytes) {
   return (bytes / (1024 * 1024 * 1024 * 1024)).toFixed(2) + ' TB'
 }
 
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close', 'logout'])
 
 const visible = ref(false)
 let closeTimer = null
@@ -81,6 +85,11 @@ function requestClose() {
   visible.value = false
   if (closeTimer) clearTimeout(closeTimer)
   closeTimer = setTimeout(() => emit('close'), 180)
+}
+
+function onLogout() {
+  emit('logout')
+  requestClose()
 }
 
 function onKeydown(e) {
@@ -200,4 +209,21 @@ onUnmounted(() => {
 }
 .ab-close:hover { color: #ccc; background: rgba(255,255,255,0.06); }
 .ab-close svg { width: 16px; height: 16px; }
+
+.ab-logout {
+  margin: 18px auto 0;
+  display: block;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #c0caff;
+  border-radius: 8px;
+  padding: 8px 18px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.ab-logout:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.28);
+}
 </style>

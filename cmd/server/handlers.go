@@ -34,15 +34,23 @@ func handleImages(w http.ResponseWriter, r *http.Request) {
 		limit = 50
 	}
 
+	u := userFromCtx(r)
+	folder := q.Get("folder")
+	if folder != "" && !userCanAccessFolder(u, folder) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	params := queryParams{
-		folder:   q.Get("folder"),
-		ftype:    q.Get("type"),
-		search:   q.Get("search"),
-		sort:     q.Get("sort"),
-		order:    q.Get("order"),
-		page:     page,
-		limit:    limit,
-		paginate: paginate,
+		folder:           folder,
+		ftype:            q.Get("type"),
+		search:           q.Get("search"),
+		sort:             q.Get("sort"),
+		order:            q.Get("order"),
+		page:             page,
+		limit:            limit,
+		paginate:         paginate,
+		deniedTopFolders: deniedTopFoldersFor(u),
 	}
 
 	images, total, err := queryFiles(params)
@@ -83,6 +91,10 @@ func handleOriginal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
+	if !userCanAccessPath(userFromCtx(r), imgPath) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	w.Header().Set("Cache-Control", cacheControlForHashedURL(imgPath, urlHash))
 	http.ServeFile(w, r, filepath.Join(photosDir, filepath.FromSlash(imgPath)))
 }
@@ -104,6 +116,10 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	folder := r.FormValue("folder")
 	if folder != "" && !isValidPath(folder) {
 		http.Error(w, "invalid folder", http.StatusBadRequest)
+		return
+	}
+	if !userCanAccessFolder(userFromCtx(r), folder) {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	src, header, err := r.FormFile("file")
@@ -130,6 +146,10 @@ func handleChunkedUpload(w http.ResponseWriter, r *http.Request, uploadID string
 	folder := r.FormValue("folder")
 	if folder != "" && !isValidPath(folder) {
 		http.Error(w, "invalid folder", http.StatusBadRequest)
+		return
+	}
+	if !userCanAccessFolder(userFromCtx(r), folder) {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -358,6 +378,13 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no paths", http.StatusBadRequest)
 		return
 	}
+	u := userFromCtx(r)
+	for _, p := range body.Paths {
+		if isValidPath(p) && !userCanAccessPath(u, p) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
 
 	type failedItem struct {
 		Path  string `json:"path"`
@@ -449,6 +476,17 @@ func handleMove(w http.ResponseWriter, r *http.Request) {
 	if body.Destination != "" && !isValidPath(body.Destination) {
 		http.Error(w, "invalid destination", http.StatusBadRequest)
 		return
+	}
+	u := userFromCtx(r)
+	if !userCanAccessFolder(u, body.Destination) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	for _, p := range body.Paths {
+		if isValidPath(p) && !userCanAccessPath(u, p) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 	}
 
 	type movedItem struct {
@@ -562,6 +600,17 @@ func handleCopy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid destination", http.StatusBadRequest)
 		return
 	}
+	u := userFromCtx(r)
+	if !userCanAccessFolder(u, body.Destination) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	for _, p := range body.Paths {
+		if isValidPath(p) && !userCanAccessPath(u, p) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
 
 	type copiedItem struct {
 		From string `json:"from"`
@@ -625,6 +674,10 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 	imgPath := strings.TrimPrefix(r.URL.Path, "/api/crop/")
 	if !isValidPath(imgPath) {
 		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	if !userCanAccessPath(userFromCtx(r), imgPath) {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -744,6 +797,7 @@ func handleFolders(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
+	u := userFromCtx(r)
 	folders := []string{}
 	for rows.Next() {
 		var f string
@@ -751,6 +805,9 @@ func handleFolders(w http.ResponseWriter, r *http.Request) {
 			log.Printf("handleFolders: scan error: %v", err)
 			http.Error(w, "scan failed", http.StatusInternalServerError)
 			return
+		}
+		if !userCanAccessFolder(u, f) {
+			continue
 		}
 		folders = append(folders, f)
 	}
@@ -799,6 +856,25 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		"imageCount":      imageCount,
 		"imageTotalBytes": imageTotalBytes,
 		"diskFreeBytes":   diskFreeBytes,
+		"usersEnabled":    appConfig != nil,
+	})
+}
+
+func handleUsers(w http.ResponseWriter, r *http.Request) {
+	type publicUser struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	users := []publicUser{}
+	if appConfig != nil {
+		for _, u := range appConfig.Users {
+			users = append(users, publicUser{ID: u.ID, Name: u.Name})
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+		"users": users,
 	})
 }
 

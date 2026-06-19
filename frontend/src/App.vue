@@ -81,7 +81,9 @@
         :image-count="imageCount"
         :image-total-bytes="imageTotalBytes"
         :disk-free-bytes="diskFreeBytes"
+        :user-name="currentUserName"
         @close="closeAbout"
+        @logout="onLogout"
       />
       <ShareUploader
         v-if="shareUploaderVisible"
@@ -125,6 +127,11 @@
         @close="chooser = null"
         @confirm="onChooserConfirm"
       />
+      <UserSelectModal
+        v-if="showUserModal"
+        :users="usersList"
+        @select="onUserSelect"
+      />
       <div class="toast-container">
         <div v-for="toast in toasts" :key="toast.id" class="toast">{{ toast.message }}</div>
       </div>
@@ -145,10 +152,21 @@ import AboutModal from './components/AboutModal.vue'
 import ImageContextMenu from './components/ImageContextMenu.vue'
 import SelectionToolbar from './components/SelectionToolbar.vue'
 import FolderChooser from './components/FolderChooser.vue'
+import UserSelectModal from './components/UserSelectModal.vue'
 import { useGallery } from './composables/useGallery.js'
 import { useImageSelection } from './composables/useImageSelection.js'
+import { useUser } from './composables/useUser.js'
 
 const { images, total, loading, error, hasMore, viewMode, folder, loadNextPage, setViewMode, setFolder, removeImage, replaceImage, forceReload } = useGallery()
+const { userId, setUser, clearUser } = useUser()
+const showUserModal = ref(false)
+const usersList = ref([])
+let usersEnabled = false
+const currentUserName = computed(() => {
+  if (!userId.value) return ''
+  const u = usersList.value.find(x => x.id === userId.value)
+  return u?.name || userId.value
+})
 
 const modalOpen = ref(false)
 const modalIndex = ref(0)
@@ -521,14 +539,50 @@ function onCropQueueDone() {
   forceReload()
 }
 
-onMounted(() => {
+async function loadUsersList() {
+  try {
+    const res = await fetch('/api/users')
+    if (!res.ok) return
+    const data = await res.json()
+    usersList.value = data.users ?? []
+  } catch {}
+}
+
+async function showUserPicker() {
+  await loadUsersList()
+  if (usersList.value.length > 0) showUserModal.value = true
+}
+
+function onUserSelect(id) {
+  setUser(id)
+  showUserModal.value = false
+  // The previously selected folder may not exist for the new user. Reset to
+  // root before loading so we don't 403 on a stale folder=… query.
+  if (folder.value !== '') {
+    history.replaceState({ modal: null }, '', '/')
+    setFolder('') // resets gallery state and triggers loadNextPage with new X-User
+  } else {
+    forceReload()
+  }
+}
+
+function onLogout() {
+  clearUser()
+  showUserPicker()
+}
+
+function onAuthRequired() {
+  showUserPicker()
+}
+
+onMounted(async () => {
   history.scrollRestoration = 'manual'
   history.replaceState({ modal: null }, '')
 
-  fetch('/api/config')
-    .then(r => r.ok ? r.json() : null)
-    .then(cfg => {
-      if (!cfg) return
+  try {
+    const r = await fetch('/api/config')
+    if (r.ok) {
+      const cfg = await r.json()
       try { localStorage.setItem('app-config', JSON.stringify(cfg)) } catch {}
       if (cfg.title) { appTitle.value = cfg.title; document.title = cfg.title }
       if (cfg.videoEnabled) videoEnabled.value = true
@@ -538,8 +592,9 @@ onMounted(() => {
       imageCount.value = cfg.imageCount ?? 0
       imageTotalBytes.value = cfg.imageTotalBytes ?? 0
       diskFreeBytes.value = cfg.diskFreeBytes ?? 0
-    })
-    .catch(() => {})
+      usersEnabled = cfg.usersEnabled === true
+    }
+  } catch {}
 
   const url = new URL(window.location.href)
   if (url.searchParams.has('share-pending')) {
@@ -548,12 +603,22 @@ onMounted(() => {
   }
   window.addEventListener('popstate', onPopState)
   window.addEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('auth:required', onAuthRequired)
+
+  if (usersEnabled) {
+    if (!userId.value) {
+      await showUserPicker()
+      return // gallery loads after user selection
+    }
+    loadUsersList() // preload so the About modal can show the display name
+  }
   loadNextPage()
 })
 
 onUnmounted(() => {
   window.removeEventListener('popstate', onPopState)
   window.removeEventListener('keydown', onGlobalKeydown)
+  window.removeEventListener('auth:required', onAuthRequired)
 })
 </script>
 

@@ -35,6 +35,7 @@ func setupTestEnv(t *testing.T) {
 	oldPhotos, oldCache := photosDir, cacheDir
 	oldTitle, oldVideo, oldBG, oldIcons, oldMedium := appTitle, videoEnabled, bgColor, iconsDir, mediumWidth
 	oldDB := db
+	oldCfg, oldUsers, oldAssigned := appConfig, usersByID, assignedTopFolders
 
 	photosDir = photos
 	cacheDir = cache
@@ -43,6 +44,9 @@ func setupTestEnv(t *testing.T) {
 	bgColor = "#000000"
 	iconsDir = ""
 	mediumWidth = 2000
+	appConfig = nil
+	usersByID = nil
+	assignedTopFolders = nil
 
 	testDB, err := openDB(":memory:")
 	if err != nil {
@@ -60,7 +64,38 @@ func setupTestEnv(t *testing.T) {
 		iconsDir = oldIcons
 		mediumWidth = oldMedium
 		db = oldDB
+		appConfig = oldCfg
+		usersByID = oldUsers
+		assignedTopFolders = oldAssigned
 	})
+}
+
+// setupUsers writes a YAML config to a temp file and loads it. Use in tests
+// that need the user feature active.
+func setupUsers(t *testing.T, yamlContent string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yamlContent), 0o644); err != nil {
+		t.Fatalf("setupUsers write: %v", err)
+	}
+	if _, err := loadConfig(path); err != nil {
+		t.Fatalf("setupUsers loadConfig: %v", err)
+	}
+}
+
+// doRequestAs is like doRequest but routes through authMiddleware with the
+// given X-User header.
+func doRequestAs(handler http.HandlerFunc, method, path, userID string, body io.Reader, contentType string) *httptest.ResponseRecorder {
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(method, path, body)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if userID != "" {
+		req.Header.Set("X-User", userID)
+	}
+	authMiddleware(handler).ServeHTTP(rr, req)
+	return rr
 }
 
 // makeTestJPEG returns a valid decodable JPEG of size w×h.

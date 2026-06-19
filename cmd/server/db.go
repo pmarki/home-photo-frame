@@ -142,14 +142,15 @@ func lookupFile(imgPath string) (ImageInfo, error) {
 
 // queryParams holds all filters and pagination options for queryFiles.
 type queryParams struct {
-	folder   string // relative folder path; "" = all files
-	ftype    string // "image", "video", or "" = all
-	search   string // substring match on filename
-	sort     string // "taken", "mtime", "name"
-	order    string // "asc" or "desc"
-	page     int
-	limit    int
-	paginate bool
+	folder           string   // relative folder path; "" = all files
+	ftype            string   // "image", "video", or "" = all
+	search           string   // substring match on filename
+	sort             string   // "taken", "mtime", "name"
+	order            string   // "asc" or "desc"
+	page             int
+	limit            int
+	paginate         bool
+	deniedTopFolders []string // top folders to exclude (any file under these is hidden); empty = no restriction
 }
 
 // queryFiles runs a filtered, sorted, paginated query against the files table.
@@ -169,6 +170,10 @@ func queryFiles(params queryParams) ([]ImageInfo, int, error) {
 	if params.search != "" {
 		conds = append(conds, "LOWER(filename) LIKE LOWER(?)")
 		args = append(args, "%"+params.search+"%")
+	}
+	for _, d := range params.deniedTopFolders {
+		conds = append(conds, "folder <> ? AND folder NOT LIKE ?||'/%'")
+		args = append(args, d, d)
 	}
 
 	where := ""

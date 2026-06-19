@@ -99,6 +99,10 @@ func serveCachedThumb(
 		http.Error(w, "invalid", http.StatusBadRequest)
 		return
 	}
+	if !userCanAccessPath(userFromCtx(r), imgPath) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	cp := cachePath(imgPath)
 	cc := cacheControlForHashedURL(imgPath, urlHash)
 
