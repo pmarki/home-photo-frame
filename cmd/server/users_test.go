@@ -246,35 +246,73 @@ func TestHandleConfigUsersEnabled(t *testing.T) {
 	})
 }
 
+const testUsersScopeYAML = `
+users:
+  - id: alice
+    name: Alice
+    folders: [vacation, work]
+  - id: bob
+    name: Bob
+    folders: [work]
+  - id: guest
+    name: Guest
+`
+
 func TestHandleFoldersUserScoped(t *testing.T) {
 	setupTestEnv(t)
-	setupUsers(t, testUsersYAML)
+	setupUsers(t, testUsersScopeYAML)
 	now := time.Now().UnixNano()
 	for _, r := range []struct{ path, folder string }{
 		{"vacation/a.jpg", "vacation"},
 		{"vacation/hawaii/b.jpg", "vacation/hawaii"},
 		{"work/c.jpg", "work"},
-		{"garden/d.jpg", "garden"},
+		{"work/2026/d.jpg", "work/2026"},
+		{"garden/e.jpg", "garden"},
 	} {
 		db.Exec(`INSERT INTO files (path,filename,folder,file_type,width,height,size,file_mtime,date_taken,indexed_at) VALUES (?,?,?,'image',0,0,0,?,?,?)`, //nolint:errcheck
 			r.path, filepath.Base(r.path), r.folder, now, now, now)
 	}
 
-	cases := map[string][]string{
-		"alice": {"garden", "vacation", "vacation/hawaii"},
-		"bob":   {"garden", "work"},
-	}
-	for who, want := range cases {
+	check := func(who string, want map[string]apiFolderEntry) {
+		t.Helper()
 		rr := doRequestAs(handleFolders, http.MethodGet, "/api/folders", who, nil, "")
 		if rr.Code != http.StatusOK {
 			t.Fatalf("%s: status = %d", who, rr.Code)
 		}
-		var resp struct{ Folders []string }
-		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
-		if !equalStrings(resp.Folders, want) {
-			t.Errorf("%s: folders = %v, want %v", who, resp.Folders, want)
+		entries := decodeFolders(t, rr)
+		if len(entries) != len(want) {
+			t.Errorf("%s: got %d entries (%v), want %d (%v)", who, len(entries), entries, len(want), want)
+		}
+		for _, got := range entries {
+			exp, ok := want[got.Path]
+			if !ok {
+				t.Errorf("%s: unexpected folder %q in response", who, got.Path)
+				continue
+			}
+			if got.Scope != exp.Scope {
+				t.Errorf("%s: folder %q scope = %q, want %q", who, got.Path, got.Scope, exp.Scope)
+			}
+			if !equalStrings(got.SharedWith, exp.SharedWith) {
+				t.Errorf("%s: folder %q sharedWith = %v, want %v", who, got.Path, got.SharedWith, exp.SharedWith)
+			}
 		}
 	}
+
+	check("alice", map[string]apiFolderEntry{
+		"garden":           {Scope: "public"},
+		"vacation":         {Scope: "private"},
+		"vacation/hawaii":  {Scope: "private"},
+		"work":             {Scope: "shared", SharedWith: []string{"bob"}},
+		"work/2026":        {Scope: "shared", SharedWith: []string{"bob"}},
+	})
+	check("bob", map[string]apiFolderEntry{
+		"garden":    {Scope: "public"},
+		"work":      {Scope: "shared", SharedWith: []string{"alice"}},
+		"work/2026": {Scope: "shared", SharedWith: []string{"alice"}},
+	})
+	check("guest", map[string]apiFolderEntry{
+		"garden": {Scope: "public"},
+	})
 }
 
 func equalStrings(a, b []string) bool {
@@ -287,6 +325,47 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func TestClassifyTopFolder(t *testing.T) {
+	setupTestEnv(t)
+	setupUsers(t, testUsersScopeYAML)
+	alice := usersByID["alice"]
+	bob := usersByID["bob"]
+
+	tests := []struct {
+		name       string
+		top        string
+		user       *ConfigUser
+		wantScope  string
+		wantShared []string
+	}{
+		{"alice/vacation", "vacation", alice, "private", nil},
+		{"alice/work", "work", alice, "shared", []string{"bob"}},
+		{"alice/garden", "garden", alice, "public", nil},
+		{"bob/work", "work", bob, "shared", []string{"alice"}},
+		{"bob/vacation (denied)", "vacation", bob, "public", nil}, // bob lacks access — helper degrades gracefully
+		{"nil user / unassigned", "garden", nil, "public", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotScope, gotShared := classifyTopFolder(tc.top, tc.user)
+			if gotScope != tc.wantScope {
+				t.Errorf("scope = %q, want %q", gotScope, tc.wantScope)
+			}
+			if !equalStrings(gotShared, tc.wantShared) {
+				t.Errorf("sharedWith = %v, want %v", gotShared, tc.wantShared)
+			}
+		})
+	}
+
+	t.Run("feature disabled returns public", func(t *testing.T) {
+		setupTestEnv(t) // re-init: appConfig stays nil
+		scope, shared := classifyTopFolder("vacation", nil)
+		if scope != "public" || shared != nil {
+			t.Errorf("got (%q, %v), want (public, nil)", scope, shared)
+		}
+	})
 }
 
 func TestHandleImagesUserScoped(t *testing.T) {

@@ -5,6 +5,7 @@
         class="ft-row"
         :class="{ 'ft-row-active': node.path === currentFolder }"
         :style="{ paddingLeft: (8 + depth * 14) + 'px' }"
+        :title="rowTitle(node)"
       >
         <button
           v-if="node.children.length > 0"
@@ -23,6 +24,47 @@
             <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
           </svg>
           <span class="ft-label">{{ node.name }}</span>
+          <svg
+            v-if="node.scope === 'private'"
+            class="ft-scope-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="8" r="3.5"/>
+            <path d="M5 20c0-3.5 3-6 7-6s7 2.5 7 6"/>
+          </svg>
+          <svg
+            v-else-if="node.scope === 'shared'"
+            class="ft-scope-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="9" cy="8" r="3"/>
+            <path d="M2.5 19c0-3 2.9-5.2 6.5-5.2s6.5 2.2 6.5 5.2"/>
+            <circle cx="17" cy="7" r="2.5"/>
+            <path d="M14.5 13.6c.8-.2 1.6-.3 2.5-.3 2.7 0 4.5 1.6 4.5 3.7"/>
+          </svg>
+          <svg
+            v-else-if="node.scope === 'public'"
+            class="ft-scope-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="5" y="11" width="14" height="9" rx="1.5"/>
+            <path d="M8 11V7a4 4 0 0 1 7.5-2"/>
+          </svg>
         </button>
       </div>
       <FolderTree
@@ -94,6 +136,17 @@ function isExpanded(node) {
 
 function toggle(node) {
   overrides[node.path] = !isExpanded(node)
+}
+
+function rowTitle(node) {
+  if (!node.scope) return ''
+  if (node.scope === 'private') return 'Only you'
+  if (node.scope === 'shared') {
+    const names = (node.sharedWith ?? []).join(', ')
+    return names ? `Shared with ${names}` : 'Shared'
+  }
+  if (node.scope === 'public') return 'Public — visible to everyone'
+  return ''
 }
 </script>
 
@@ -169,6 +222,16 @@ function toggle(node) {
   color: #8a8a98;
   opacity: 0.85;
 }
+
+.ft-scope-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  margin-left: auto;
+  color: #8a8a98;
+  opacity: 0.7;
+}
+.ft-row-active .ft-scope-icon { color: #c0caff; opacity: 0.85; }
 
 .ft-label {
   white-space: nowrap;

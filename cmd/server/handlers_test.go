@@ -35,7 +35,7 @@ func setupTestEnv(t *testing.T) {
 	oldPhotos, oldCache := photosDir, cacheDir
 	oldTitle, oldVideo, oldBG, oldIcons, oldMedium := appTitle, videoEnabled, bgColor, iconsDir, mediumWidth
 	oldDB := db
-	oldCfg, oldUsers, oldAssigned := appConfig, usersByID, assignedTopFolders
+	oldCfg, oldUsers, oldAssigned, oldOwners := appConfig, usersByID, assignedTopFolders, folderOwners
 
 	photosDir = photos
 	cacheDir = cache
@@ -47,6 +47,7 @@ func setupTestEnv(t *testing.T) {
 	appConfig = nil
 	usersByID = nil
 	assignedTopFolders = nil
+	folderOwners = nil
 
 	testDB, err := openDB(":memory:")
 	if err != nil {
@@ -67,6 +68,7 @@ func setupTestEnv(t *testing.T) {
 		appConfig = oldCfg
 		usersByID = oldUsers
 		assignedTopFolders = oldAssigned
+		folderOwners = oldOwners
 	})
 }
 
@@ -81,6 +83,32 @@ func setupUsers(t *testing.T, yamlContent string) {
 	if _, err := loadConfig(path); err != nil {
 		t.Fatalf("setupUsers loadConfig: %v", err)
 	}
+}
+
+// apiFolderEntry mirrors the JSON shape returned by /api/folders.
+type apiFolderEntry struct {
+	Path       string   `json:"path"`
+	Scope      string   `json:"scope"`
+	SharedWith []string `json:"sharedWith,omitempty"`
+}
+
+func decodeFolders(t *testing.T, rr *httptest.ResponseRecorder) []apiFolderEntry {
+	t.Helper()
+	var resp struct {
+		Folders []apiFolderEntry `json:"folders"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode folders: %v", err)
+	}
+	return resp.Folders
+}
+
+func folderPaths(entries []apiFolderEntry) []string {
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		out[i] = e.Path
+	}
+	return out
 }
 
 // doRequestAs is like doRequest but routes through authMiddleware with the
@@ -258,12 +286,9 @@ func TestHandleFolders(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", rr.Code)
 		}
-		var resp struct{ Folders []string }
-		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
-		if len(resp.Folders) != 0 {
-			t.Errorf("folders = %v, want empty", resp.Folders)
+		entries := decodeFolders(t, rr)
+		if len(entries) != 0 {
+			t.Errorf("folders = %v, want empty", entries)
 		}
 	})
 
@@ -287,15 +312,14 @@ func TestHandleFolders(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", rr.Code)
 		}
-		var resp struct{ Folders []string }
-		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		paths := folderPaths(decodeFolders(t, rr))
 		want := []string{"vacation", "family", "alpha"}
-		if len(resp.Folders) != len(want) {
-			t.Fatalf("folders = %v, want %v", resp.Folders, want)
+		if len(paths) != len(want) {
+			t.Fatalf("folders = %v, want %v", paths, want)
 		}
 		for i, w := range want {
-			if resp.Folders[i] != w {
-				t.Errorf("folders[%d] = %q, want %q", i, resp.Folders[i], w)
+			if paths[i] != w {
+				t.Errorf("folders[%d] = %q, want %q", i, paths[i], w)
 			}
 		}
 	})
@@ -322,17 +346,21 @@ func TestHandleFolders(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200", rr.Code)
 		}
-		var resp struct{ Folders []string }
-		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
-			t.Fatalf("decode: %v", err)
-		}
+		entries := decodeFolders(t, rr)
+		paths := folderPaths(entries)
 		want := []string{"family", "vacation", "vacation/hawaii"}
-		if len(resp.Folders) != len(want) {
-			t.Fatalf("folders = %v, want %v", resp.Folders, want)
+		if len(paths) != len(want) {
+			t.Fatalf("folders = %v, want %v", paths, want)
 		}
 		for i, w := range want {
-			if resp.Folders[i] != w {
-				t.Errorf("folders[%d] = %q, want %q", i, resp.Folders[i], w)
+			if paths[i] != w {
+				t.Errorf("folders[%d] = %q, want %q", i, paths[i], w)
+			}
+		}
+		// With no users config, every folder must come back as public.
+		for _, e := range entries {
+			if e.Scope != "public" {
+				t.Errorf("scope for %q = %q, want public", e.Path, e.Scope)
 			}
 		}
 	})

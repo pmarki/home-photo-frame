@@ -798,7 +798,12 @@ func handleFolders(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	u := userFromCtx(r)
-	folders := []string{}
+	type folderEntry struct {
+		Path       string   `json:"path"`
+		Scope      string   `json:"scope"`
+		SharedWith []string `json:"sharedWith,omitempty"`
+	}
+	folders := []folderEntry{}
 	for rows.Next() {
 		var f string
 		if err := rows.Scan(&f); err != nil {
@@ -809,7 +814,12 @@ func handleFolders(w http.ResponseWriter, r *http.Request) {
 		if !userCanAccessFolder(u, f) {
 			continue
 		}
-		folders = append(folders, f)
+		top := f
+		if i := strings.IndexByte(f, '/'); i >= 0 {
+			top = f[:i]
+		}
+		scope, sharedWith := classifyTopFolder(top, u)
+		folders = append(folders, folderEntry{Path: f, Scope: scope, SharedWith: sharedWith})
 	}
 	if err := rows.Err(); err != nil {
 		log.Printf("handleFolders: rows error: %v", err)

@@ -27,6 +27,10 @@ var (
 	appConfig          *Config
 	usersByID          map[string]*ConfigUser
 	assignedTopFolders map[string]struct{}
+	// folderOwners maps a top-level folder name to the user ids that have it
+	// in their config (in the order users were declared). Used by handleFolders
+	// to classify each returned folder as public/private/shared.
+	folderOwners map[string][]string
 )
 
 // loadConfig parses the YAML file at path and installs the result in the
@@ -52,6 +56,7 @@ func loadConfig(path string) (*Config, error) {
 
 	byID := make(map[string]*ConfigUser, len(cfg.Users))
 	assigned := make(map[string]struct{})
+	owners := make(map[string][]string)
 	for i := range cfg.Users {
 		u := &cfg.Users[i]
 		if u.ID == "" {
@@ -69,13 +74,51 @@ func loadConfig(path string) (*Config, error) {
 				return nil, fmt.Errorf("config: user %q has invalid folder %q (top-level names only, no separators)", u.ID, f)
 			}
 			assigned[f] = struct{}{}
+			owners[f] = append(owners[f], u.ID)
 		}
 	}
 
 	usersByID = byID
 	assignedTopFolders = assigned
+	folderOwners = owners
 	appConfig = &cfg
 	return &cfg, nil
+}
+
+// classifyTopFolder returns the scope of a top folder for the given user, and
+// the co-owners (other user ids) when shared. Returns ("public", nil) when the
+// users feature is disabled or the folder is unassigned.
+func classifyTopFolder(top string, current *ConfigUser) (scope string, sharedWith []string) {
+	if appConfig == nil {
+		return "public", nil
+	}
+	owners := folderOwners[top]
+	if len(owners) == 0 {
+		return "public", nil
+	}
+	currentID := ""
+	if current != nil {
+		currentID = current.ID
+	}
+	others := make([]string, 0, len(owners))
+	hasCurrent := false
+	for _, id := range owners {
+		if id == currentID {
+			hasCurrent = true
+		} else {
+			others = append(others, id)
+		}
+	}
+	if !hasCurrent {
+		// The current user cannot see this folder anyway; userCanAccessFolder
+		// should have filtered it out before we get here. Treat as public so
+		// the response is still well-formed if it ever slips through.
+		return "public", nil
+	}
+	if len(others) == 0 {
+		return "private", nil
+	}
+	return "shared", others
 }
 
 // deniedTopFoldersFor returns the top folders u cannot see: folders that are
