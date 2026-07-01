@@ -1,5 +1,6 @@
 <template>
   <div class="app">
+    <div class="app-top">
     <header class="app-header">
       <h1 class="app-title">
         <button class="title-icon-btn" aria-label="Open menu" @click="openSideMenu">
@@ -18,8 +19,33 @@
         {{ appTitle }}
       </h1>
 
+      <button
+        v-if="filterButtonVisible"
+        class="sort-icon-btn header-filter-btn"
+        :class="{ active: filtersOpen || hasActiveFilters }"
+        :title="filtersOpen ? 'Hide filters' : 'Show filters'"
+        aria-label="Toggle filters"
+        :aria-expanded="filtersOpen"
+        @click="filtersOpen = !filtersOpen"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="3 4 21 4 14 12 14 20 10 18 10 12 3 4"/>
+        </svg>
+      </button>
       <ViewModeToggle class="header-view-mode" :mode="viewMode" @change="setViewMode" />
     </header>
+
+    <FilterBar
+      v-if="filtersOpen"
+      :users="usersList"
+      :current-user-id="userId"
+      :video-enabled="videoEnabled"
+      :available-years="availableYears"
+      :value="filters"
+      @change="onFilterChange"
+      @clear="onFilterClear"
+    />
+    </div>
 
     <main>
       <nav v-if="folder" class="breadcrumb" aria-label="Folder breadcrumb">
@@ -140,13 +166,14 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import GalleryGrid from './components/GalleryGrid.vue'
 import LightboxModal from './components/LightboxModal.vue'
 import ShareUploader from './components/ShareUploader.vue'
 import UploadDialog from './components/UploadDialog.vue'
 import PostUploadCropQueue from './components/PostUploadCropQueue.vue'
 import ViewModeToggle from './components/ViewModeToggle.vue'
+import FilterBar from './components/FilterBar.vue'
 import SideMenu from './components/SideMenu.vue'
 import AboutModal from './components/AboutModal.vue'
 import ImageContextMenu from './components/ImageContextMenu.vue'
@@ -157,7 +184,17 @@ import { useGallery } from './composables/useGallery.js'
 import { useImageSelection } from './composables/useImageSelection.js'
 import { useUser } from './composables/useUser.js'
 
-const { images, total, loading, error, hasMore, viewMode, folder, loadNextPage, setViewMode, setFolder, removeImage, replaceImage, forceReload } = useGallery()
+function mixWithBlack(hex, pct) {
+  let h = String(hex || '').trim().replace('#', '')
+  if (h.length === 3) h = h.split('').map(c => c + c).join('')
+  if (h.length !== 6) return hex
+  const r = Math.round(parseInt(h.slice(0, 2), 16) * pct)
+  const g = Math.round(parseInt(h.slice(2, 4), 16) * pct)
+  const b = Math.round(parseInt(h.slice(4, 6), 16) * pct)
+  return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('')
+}
+
+const { images, total, loading, error, hasMore, viewMode, folder, filters, loadNextPage, setViewMode, setFolder, setFilters, removeImage, replaceImage, forceReload } = useGallery()
 const { userId, setUser, clearUser } = useUser()
 const showUserModal = ref(false)
 const usersList = ref([])
@@ -167,6 +204,35 @@ const currentUserName = computed(() => {
   const u = usersList.value.find(x => x.id === userId.value)
   return u?.name || userId.value
 })
+
+const filtersOpen = ref(false)
+const hasActiveFilters = computed(() => !!filters.value.owner || !!filters.value.year || !!filters.value.type)
+const filterButtonVisible = computed(() => usersList.value.length > 0 || videoEnabled.value || images.value.length > 0)
+const availableYears = computed(() => {
+  const seen = new Set()
+  for (const img of images.value) {
+    if (!img?.modTime) continue
+    const y = new Date(img.modTime).getFullYear()
+    if (Number.isFinite(y)) seen.add(y)
+  }
+  // Keep the currently-selected year visible even if no images of that year
+  // are currently loaded (e.g. landing on ?year=2023 narrows the result set).
+  if (filters.value.year) seen.add(filters.value.year)
+  return Array.from(seen).sort((a, b) => b - a)
+})
+
+function onFilterChange(partial) {
+  if (loading.value) return
+  setFilters(partial)
+}
+
+function onFilterClear() {
+  setFilters({ owner: '', year: 0, type: '' })
+}
+
+// Keep the bar open whenever a filter is active so the user can see what's
+// applied without having to retoggle the funnel.
+watch(hasActiveFilters, (active) => { if (active) filtersOpen.value = true })
 
 const modalOpen = ref(false)
 const modalIndex = ref(0)
@@ -586,7 +652,11 @@ onMounted(async () => {
       try { localStorage.setItem('app-config', JSON.stringify(cfg)) } catch {}
       if (cfg.title) { appTitle.value = cfg.title; document.title = cfg.title }
       if (cfg.videoEnabled) videoEnabled.value = true
-      if (cfg.bgColor) document.documentElement.style.setProperty('--bg-color', cfg.bgColor)
+      if (cfg.bgColor) {
+        document.documentElement.style.setProperty('--bg-color', cfg.bgColor)
+        const tc = document.querySelector('meta[name="theme-color"]')
+        if (tc) tc.setAttribute('content', mixWithBlack(cfg.bgColor, 0.45))
+      }
       titleIcon.value = cfg.titleIcon ?? false
       buildNumber.value = cfg.buildNumber ?? ''
       imageCount.value = cfg.imageCount ?? 0
@@ -643,11 +713,15 @@ body {
   padding: 0 12px;
 }
 
-/* ─── Header ───────────────────────────────────────────────────────── */
-.app-header {
+/* ─── Sticky top (header + optional filter bar) ────────────────────── */
+.app-top {
   position: sticky;
   top: 0;
   z-index: 100;
+}
+
+/* ─── Header ───────────────────────────────────────────────────────── */
+.app-header {
   background: color-mix(in srgb, var(--bg-color, #0a0a0f) 45%, black);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -661,6 +735,10 @@ body {
 }
 
 .header-view-mode {
+  margin-left: 6px;
+}
+
+.header-filter-btn {
   margin-left: auto;
 }
 

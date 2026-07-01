@@ -33,9 +33,12 @@ Drop images into a folder, get a fast infinite-scroll gallery with full-screen l
 - **Upload** — drag-and-drop or file picker with per-file progress bar; chunked (1.5 MB/chunk) so uploads survive slow connections and proxy read-timeouts; 500 MB per-file cap enforced server-side; retry button for failed files; optional post-upload crop queue
 - **Year scrollbar** — Google Photos-style overlay on the right edge: year markers fade in while scrolling (highlighted for the current year), with a touch-draggable 3-D handle for jumping directly to any year; hidden on mouse/desktop (labels only), touch-only on mobile
 - **Sort** — by filename, photo date (EXIF → filename pattern → mtime), or modification time, ascending or descending; persisted to localStorage
+- **Filter bar** — funnel icon in the header opens a compact bar with icon chips for **person** (from configured users), **year** (derived from the loaded set), and **type** (photo / video). Header and filter bar are sticky, so the bar stays visible even when opened mid-scroll. In the person filter the current user shows as their own name; every other user is listed as *"Shared with NAME"* to signal that picking them scopes to shared folders, not all folders they own. Filters are mirrored to the URL query string (`?owner=…&year=…&type=…`) so a filtered view is shareable and survives refresh. Popovers become bottom sheets on phone/tablet widths (≤ 768 px)
+- **Sidebar folder search** — search input under "All photos" filters the folder tree client-side; matching substrings are highlighted; parent chains are preserved so matches keep their context (e.g. searching `20` shows `home → 2006`). Case- and diacritic-insensitive (`wywo` matches `wywołania`, `jesien` matches `jesień`). Manual expand/collapse state is left untouched — clearing the search restores it. `Esc` and a ✕ button clear the field
+- **Users / folder owners** *(optional)* — a `config.yaml` next to the binary can define named users and the top-level folders they own; the frontend prompts once and remembers the choice; folders not listed under any user are public. Enables the person filter and per-folder scope icons (private / shared / public) in the sidebar tree
 - **Share original** — Web Share API (file blob) on mobile; download fallback on desktop
 - **Android share target** — share photos *into* the app from any Android app; the service worker intercepts the POST, stores files in the Cache API, the app shows per-file upload progress
-- **PWA** — installable, offline shell via Workbox precaching; `/api/config` (title, colours) is cached by the service worker and in `localStorage` so the app loads with the correct theme instantly, even offline
+- **PWA** — installable, offline shell via Workbox precaching; `/api/config` (title, colours) is cached by the service worker and in `localStorage` so the app loads with the correct theme instantly, even offline. The Android status/top bar (`<meta name="theme-color">`) is kept in sync with a darker mix of the configured `BG_COLOR`, matching the app header chrome
 - **Multi-instance** — configurable title and PWA manifest name so two parallel instances (e.g. prod + test) appear as distinct installed apps
 
 ## Quickstart
@@ -221,6 +224,8 @@ Returns a sorted list of all images (or a paginated page when `limit` is supplie
 | `folder` | relative path | *(all)* | Limit results to a folder and all its subfolders. E.g. `folder=vacation` returns `vacation/a.jpg` and `vacation/hawaii/b.jpg`. Omit to return all files |
 | `type` | `image` \| `video` | *(all)* | Filter by file type |
 | `search` | string | *(none)* | Case-insensitive substring match on filename (not full path) |
+| `year` | integer | *(all)* | Calendar year (UTC) of `date_taken`, e.g. `year=2024`. Combines with other filters |
+| `owner` | user id | *(all)* | Restrict to top-level folders owned by the given user id from `config.yaml`. Returns no results if the id isn't configured. Combines with the caller's own access rules (owner filter never widens visibility) |
 | `limit` | 1–10 000 | *(omit for all)* | Images per page. When omitted all matching files are returned in one response |
 | `page` | integer ≥ 1 | `1` | Page number (1-based); only meaningful when `limit` is set |
 

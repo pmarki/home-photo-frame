@@ -489,6 +489,101 @@ func TestHandleImages(t *testing.T) {
 			t.Errorf("search: got total=%d, want 1 beach_2024.jpg", resp.Total)
 		}
 	})
+
+	t.Run("filter by year", func(t *testing.T) {
+		setupTestEnv(t)
+		rows := []struct {
+			path string
+			ts   time.Time
+		}{
+			{"a.jpg", time.Date(2022, 6, 1, 12, 0, 0, 0, time.UTC)},
+			{"b.jpg", time.Date(2023, 6, 1, 12, 0, 0, 0, time.UTC)},
+			{"c.jpg", time.Date(2023, 12, 31, 23, 0, 0, 0, time.UTC)},
+			{"d.jpg", time.Date(2024, 1, 1, 1, 0, 0, 0, time.UTC)},
+		}
+		for _, r := range rows {
+			db.Exec(`INSERT INTO files (path,filename,folder,file_type,width,height,size,file_mtime,date_taken,indexed_at) VALUES (?,?,'','image',0,0,0,?,?,?)`, //nolint:errcheck
+				r.path, r.path, r.ts.UnixNano(), r.ts.UnixNano(), r.ts.UnixNano())
+		}
+		rr := doRequest(handleImages, http.MethodGet, "/api/images?year=2023", nil, "")
+		var resp ListResponse
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if resp.Total != 2 {
+			t.Errorf("year=2023 total = %d, want 2", resp.Total)
+		}
+		for _, img := range resp.Images {
+			if img.Path != "b.jpg" && img.Path != "c.jpg" {
+				t.Errorf("unexpected image %q in year=2023 result", img.Path)
+			}
+		}
+	})
+
+	t.Run("filter by owner restricts to owner's top folders", func(t *testing.T) {
+		setupTestEnv(t)
+		setupUsers(t, "users:\n  - id: alice\n    folders: [alice_pics]\n  - id: bob\n    folders: [bob_pics, shared]\n  - id: carol\n    folders: [shared]\n")
+		now := time.Now().UnixNano()
+		rows := []struct{ path, folder string }{
+			{"alice_pics/a.jpg", "alice_pics"},
+			{"alice_pics/sub/a2.jpg", "alice_pics/sub"},
+			{"bob_pics/b.jpg", "bob_pics"},
+			{"shared/s.jpg", "shared"},
+			{"loose.jpg", ""},
+		}
+		for _, r := range rows {
+			db.Exec(`INSERT INTO files (path,filename,folder,file_type,width,height,size,file_mtime,date_taken,indexed_at) VALUES (?,?,?,'image',0,0,0,?,?,?)`, //nolint:errcheck
+				r.path, filepath.Base(r.path), r.folder, now, now, now)
+		}
+
+		t.Run("alice owns one folder + subfolder", func(t *testing.T) {
+			rr := doRequest(handleImages, http.MethodGet, "/api/images?owner=alice", nil, "")
+			var resp ListResponse
+			json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+			if resp.Total != 2 {
+				t.Errorf("owner=alice total = %d, want 2", resp.Total)
+			}
+		})
+
+		t.Run("carol owns shared only", func(t *testing.T) {
+			rr := doRequest(handleImages, http.MethodGet, "/api/images?owner=carol", nil, "")
+			var resp ListResponse
+			json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+			if resp.Total != 1 || resp.Images[0].Path != "shared/s.jpg" {
+				t.Errorf("owner=carol got total=%d, want 1 shared/s.jpg", resp.Total)
+			}
+		})
+
+		t.Run("unknown owner forces empty result", func(t *testing.T) {
+			rr := doRequest(handleImages, http.MethodGet, "/api/images?owner=nobody", nil, "")
+			var resp ListResponse
+			json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+			if resp.Total != 0 {
+				t.Errorf("owner=nobody total = %d, want 0", resp.Total)
+			}
+		})
+	})
+
+	t.Run("year + owner combined", func(t *testing.T) {
+		setupTestEnv(t)
+		setupUsers(t, "users:\n  - id: alice\n    folders: [alice_pics]\n")
+		rows := []struct {
+			path, folder string
+			ts           time.Time
+		}{
+			{"alice_pics/a.jpg", "alice_pics", time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)},
+			{"alice_pics/b.jpg", "alice_pics", time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)},
+			{"other/c.jpg", "other", time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)},
+		}
+		for _, r := range rows {
+			db.Exec(`INSERT INTO files (path,filename,folder,file_type,width,height,size,file_mtime,date_taken,indexed_at) VALUES (?,?,?,'image',0,0,0,?,?,?)`, //nolint:errcheck
+				r.path, filepath.Base(r.path), r.folder, r.ts.UnixNano(), r.ts.UnixNano(), r.ts.UnixNano())
+		}
+		rr := doRequest(handleImages, http.MethodGet, "/api/images?owner=alice&year=2023", nil, "")
+		var resp ListResponse
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if resp.Total != 1 || resp.Images[0].Path != "alice_pics/a.jpg" {
+			t.Errorf("owner=alice&year=2023 got total=%d path=%q, want 1 alice_pics/a.jpg", resp.Total, resp.Images[0].Path)
+		}
+	})
 }
 
 // ── TestHandleUpload ──────────────────────────────────────────────────────

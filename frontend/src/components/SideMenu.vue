@@ -50,16 +50,44 @@
           <span>All photos</span>
         </button>
 
+        <div v-if="tree.length > 0" class="sm-search-wrap">
+          <input
+            ref="searchInputEl"
+            :value="searchTerm"
+            type="search"
+            class="sm-search-input"
+            placeholder="Search"
+            aria-label="Search folders"
+            autocomplete="off"
+            @input="searchTerm = $event.target.value"
+            @keydown.esc="onSearchEsc"
+          />
+          <button
+            v-if="searchTerm"
+            class="sm-search-clear"
+            type="button"
+            aria-label="Clear search"
+            @click="clearSearch"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="6" y1="6" x2="18" y2="18"/>
+              <line x1="18" y1="6" x2="6" y2="18"/>
+            </svg>
+          </button>
+        </div>
+
         <div v-if="loadingFolders" class="sm-folders-state">Loading…</div>
         <div v-else-if="foldersError" class="sm-folders-state sm-folders-error">
           <span>{{ foldersError }}</span>
           <button class="sm-folders-retry" @click="fetchFolders">Retry</button>
         </div>
         <div v-else-if="tree.length === 0" class="sm-folders-state">No folders</div>
+        <div v-else-if="activeTerm && displayTree.length === 0" class="sm-folders-state">No matches</div>
         <FolderTree
           v-else
-          :nodes="tree"
+          :nodes="displayTree"
           :current-folder="folder"
+          :highlight="activeTerm"
           @select="select"
         />
       </nav>
@@ -77,9 +105,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, onUnmounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, nextTick, watch } from 'vue'
 import FolderTree from './FolderTree.vue'
-import { buildFolderTree, FOLDER_ORDER } from '../composables/useFolderTree.js'
+import { buildFolderTree, filterFolderTree, foldStr, FOLDER_ORDER } from '../composables/useFolderTree.js'
 import { lockBodyOverflow, unlockBodyOverflow } from '../composables/useBodyOverflowLock.js'
 import { useUser } from '../composables/useUser.js'
 
@@ -97,10 +125,32 @@ const emit = defineEmits(['close', 'upload-files', 'select-folder', 'open-about'
 const visible = ref(false)
 const fileInput = ref(null)
 const foldersEl = ref(null)
+const searchInputEl = ref(null)
 const tree = ref([])
 const loadingFolders = ref(true)
 const foldersError = ref(null)
+const searchTerm = ref('')
 let closeTimer = null
+
+const activeTerm = computed(() => {
+  const folded = foldStr(searchTerm.value.trim())
+  return folded.length >= 2 ? folded : ''
+})
+const displayTree = computed(() =>
+  activeTerm.value ? filterFolderTree(tree.value, activeTerm.value) : tree.value
+)
+
+function clearSearch() {
+  searchTerm.value = ''
+  searchInputEl.value?.focus()
+}
+
+function onSearchEsc(e) {
+  if (!searchTerm.value) return
+  e.stopPropagation()
+  e.preventDefault()
+  searchTerm.value = ''
+}
 
 function requestClose() {
   if (!visible.value) return
@@ -310,6 +360,51 @@ onUnmounted(() => {
   color: #c0caff;
 }
 .sm-all-active svg { color: #c0caff; }
+
+.sm-search-wrap {
+  position: relative;
+  margin: 2px 0 8px 0;
+}
+.sm-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 32px 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: #e0e0e8;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 16px;
+  outline: none;
+  transition: border-color 0.15s, background 0.15s;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.sm-search-input::placeholder { color: #888; }
+.sm-search-input:focus {
+  border-color: rgba(100, 120, 220, 0.5);
+  background: rgba(255, 255, 255, 0.06);
+}
+.sm-search-input::-webkit-search-cancel-button { display: none; }
+
+.sm-search-clear {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: #888;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.sm-search-clear svg { width: 14px; height: 14px; }
+.sm-search-clear:hover { color: #ccc; background: rgba(255, 255, 255, 0.06); }
 
 .sm-folders-state {
   padding: 12px 8px;

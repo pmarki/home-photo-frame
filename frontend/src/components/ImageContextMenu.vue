@@ -150,6 +150,9 @@ onUnmounted(() => {
   -webkit-backdrop-filter: blur(12px);
   outline: none;
   animation: ctx-in 0.12s ease;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 @keyframes ctx-in {

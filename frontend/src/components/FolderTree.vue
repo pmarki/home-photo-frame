@@ -23,7 +23,12 @@
           <svg class="ft-folder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
             <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
           </svg>
-          <span class="ft-label">{{ node.name }}</span>
+          <span class="ft-label">
+            <template v-if="highlightRange(node)">
+              {{ node.name.slice(0, highlightRange(node).start) }}<mark class="ft-highlight">{{ node.name.slice(highlightRange(node).start, highlightRange(node).end) }}</mark>{{ node.name.slice(highlightRange(node).end) }}
+            </template>
+            <template v-else>{{ node.name }}</template>
+          </span>
           <svg
             v-if="node.scope === 'private'"
             class="ft-scope-icon"
@@ -68,11 +73,12 @@
         </button>
       </div>
       <FolderTree
-        v-if="node.children.length > 0 && isExpanded(node)"
+        v-if="node.children.length > 0 && (highlight || isExpanded(node))"
         :nodes="node.children"
         :current-folder="currentFolder"
         :depth="depth + 1"
         :auto-expand-depth="autoExpandDepth"
+        :highlight="highlight"
         @select="$emit('select', $event)"
       />
     </li>
@@ -119,14 +125,24 @@ watch(overrides, (state) => {
 <script setup>
 defineOptions({ name: 'FolderTree' })
 
+import { foldStr } from '../composables/useFolderTree.js'
+
 const props = defineProps({
   nodes: { type: Array, required: true },
   currentFolder: { type: String, default: '' },
   depth: { type: Number, default: 0 },
   autoExpandDepth: { type: Number, default: 4 },
+  highlight: { type: String, default: '' },
 })
 
 defineEmits(['select'])
+
+function highlightRange(node) {
+  if (!props.highlight) return null
+  const idx = foldStr(node.name).indexOf(props.highlight)
+  if (idx < 0) return null
+  return { start: idx, end: idx + props.highlight.length }
+}
 
 function isExpanded(node) {
   const v = overrides[node.path]
@@ -238,5 +254,12 @@ function rowTitle(node) {
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: 0.9rem;
+}
+
+.ft-highlight {
+  background: rgba(100, 120, 220, 0.35);
+  color: #fff;
+  border-radius: 2px;
+  padding: 0 1px;
 }
 </style>

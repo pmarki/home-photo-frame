@@ -29,7 +29,7 @@ export default defineConfig({
         name: 'Home Photo Frame',
         short_name: 'PhotoFrame',
         description: 'Local photo gallery with infinite scroll',
-        theme_color: '#1a1a2e',
+        theme_color: '#050507',
         background_color: '#0a0a0f',
         display: 'standalone',
         orientation: 'any',

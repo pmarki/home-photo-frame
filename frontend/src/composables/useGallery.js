@@ -17,6 +17,25 @@ function readFolderFromUrl() {
   return m ? decodeURI(m[1]) : ''
 }
 
+function readFiltersFromUrl() {
+  const q = new URLSearchParams(window.location.search)
+  return {
+    owner: q.get('owner') || '',
+    year: Number(q.get('year')) || 0,
+    type: q.get('type') || '',
+  }
+}
+
+function writeFiltersToUrl(filters) {
+  const q = new URLSearchParams(window.location.search)
+  if (filters.owner) q.set('owner', filters.owner); else q.delete('owner')
+  if (filters.year)  q.set('year', String(filters.year)); else q.delete('year')
+  if (filters.type)  q.set('type', filters.type); else q.delete('type')
+  const qs = q.toString()
+  const next = window.location.pathname + (qs ? '?' + qs : '') + window.location.hash
+  window.history.replaceState(window.history.state, '', next)
+}
+
 export function useGallery() {
   const images = ref([])
   const total = ref(0)
@@ -27,6 +46,7 @@ export function useGallery() {
   const sortBy = ref(MODE_SORT[viewMode.value].sortBy)
   const sortOrder = ref(MODE_SORT[viewMode.value].sortOrder)
   const folder = ref(readFolderFromUrl())
+  const filters = ref(readFiltersFromUrl())
   let generation = 0
   let currentController = null
 
@@ -53,6 +73,9 @@ export function useGallery() {
         limit: PAGE_LIMIT,
       })
       if (folder.value) params.set('folder', folder.value)
+      if (filters.value.owner) params.set('owner', filters.value.owner)
+      if (filters.value.year)  params.set('year', String(filters.value.year))
+      if (filters.value.type)  params.set('type', filters.value.type)
       const res = await fetch(`/api/images?${params}`, { signal: controller.signal })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
@@ -139,6 +162,17 @@ export function useGallery() {
     await loadNextPage()
   }
 
+  async function setFilters(partial) {
+    const next = { ...filters.value, ...partial }
+    if (next.owner === filters.value.owner &&
+        next.year  === filters.value.year &&
+        next.type  === filters.value.type) return
+    filters.value = next
+    writeFiltersToUrl(next)
+    resetState()
+    await loadNextPage()
+  }
+
   return {
     images,
     total,
@@ -147,9 +181,11 @@ export function useGallery() {
     hasMore,
     viewMode,
     folder,
+    filters,
     loadNextPage,
     setViewMode,
     setFolder,
+    setFilters,
     removeImage,
     replaceImage,
     forceReload,

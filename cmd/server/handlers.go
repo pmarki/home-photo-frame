@@ -41,10 +41,30 @@ func handleImages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	year, _ := strconv.Atoi(q.Get("year"))
+
+	var ownerFolders []string
+	if ownerID := q.Get("owner"); ownerID != "" {
+		// Non-nil empty slice forces an empty result when the owner exists but
+		// owns nothing (or doesn't exist at all). queryFiles distinguishes nil
+		// (no filter) from empty (always-false).
+		ownerFolders = []string{}
+		for folder, owners := range folderOwners {
+			for _, id := range owners {
+				if id == ownerID {
+					ownerFolders = append(ownerFolders, folder)
+					break
+				}
+			}
+		}
+	}
+
 	params := queryParams{
 		folder:           folder,
 		ftype:            q.Get("type"),
 		search:           q.Get("search"),
+		year:             year,
+		ownerFolders:     ownerFolders,
 		sort:             q.Get("sort"),
 		order:            q.Get("order"),
 		page:             page,

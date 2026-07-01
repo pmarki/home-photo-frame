@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#1a1a2e" />
+    <meta name="theme-color" content="#050507" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
@@ -13,9 +13,22 @@
     <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
     <title>Photo Frame</title>
     <script>
+      function _mixWithBlack(hex, pct) {
+        var h = String(hex || '').trim().replace('#', '')
+        if (h.length === 3) h = h.split('').map(function (c) { return c + c }).join('')
+        if (h.length !== 6) return hex
+        var r = Math.round(parseInt(h.slice(0, 2), 16) * pct)
+        var g = Math.round(parseInt(h.slice(2, 4), 16) * pct)
+        var b = Math.round(parseInt(h.slice(4, 6), 16) * pct)
+        return '#' + [r, g, b].map(function (v) { return v.toString(16).padStart(2, '0') }).join('')
+      }
       try {
         var _cfg = JSON.parse(localStorage.getItem('app-config') || 'null')
-        if (_cfg && _cfg.bgColor) document.documentElement.style.setProperty('--bg-color', _cfg.bgColor)
+        if (_cfg && _cfg.bgColor) {
+          document.documentElement.style.setProperty('--bg-color', _cfg.bgColor)
+          var _tc = document.querySelector('meta[name="theme-color"]')
+          if (_tc) _tc.setAttribute('content', _mixWithBlack(_cfg.bgColor, 0.45))
+        }
         if (_cfg && _cfg.title) document.title = _cfg.title
       } catch (e) {}
     </script>

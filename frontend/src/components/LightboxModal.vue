@@ -623,7 +623,7 @@ onUnmounted(() => {
 .lb-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.96);
+  background: var(--bg-color, #0a0a0f);
   z-index: 9999;
   display: flex;
   flex-direction: column;

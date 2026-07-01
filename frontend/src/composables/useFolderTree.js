@@ -3,6 +3,33 @@
 // runtime-added nodes follow the same ordering the API returned.
 export const FOLDER_ORDER = 'desc'
 
+// Fold a string for accent-insensitive comparison. NFD splits combining accents
+// off the base letter and the diacritic regex drops them, which handles the
+// standard Polish accents (ń ó ą ę ś ć ź ż). ł is a precomposed letter with no
+// canonical decomposition, so NFD leaves it as-is — we map it manually.
+// Preserves char-for-char length so callers can index the original string
+// using folded offsets.
+export function foldStr(s) {
+  return s
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .toLowerCase()
+    .replace(/ł/g, 'l')
+}
+
+// Recursively prune the tree, keeping any node whose own name matches the
+// pre-folded term OR whose subtree contains a match. Never mutates input.
+export function filterFolderTree(nodes, foldedTerm) {
+  const out = []
+  for (const n of nodes) {
+    const childrenKept = filterFolderTree(n.children, foldedTerm)
+    const selfMatch = foldStr(n.name).includes(foldedTerm)
+    if (!selfMatch && childrenKept.length === 0) continue
+    out.push({ ...n, children: childrenKept })
+  }
+  return out
+}
+
 // folders: Array of { path, scope?, sharedWith? } as returned by /api/folders.
 // String entries are also accepted (treated as { path }) for backwards
 // compatibility with callers that don't have scope info.

@@ -145,6 +145,8 @@ type queryParams struct {
 	folder           string   // relative folder path; "" = all files
 	ftype            string   // "image", "video", or "" = all
 	search           string   // substring match on filename
+	year             int      // calendar year of date_taken (UTC); 0 = no filter
+	ownerFolders     []string // top-level folders associated with a selected owner; nil/empty = no filter. A non-nil but empty slice means "owner matched no folders" and forces an empty result.
 	sort             string   // "taken", "mtime", "name"
 	order            string   // "asc" or "desc"
 	page             int
@@ -170,6 +172,24 @@ func queryFiles(params queryParams) ([]ImageInfo, int, error) {
 	if params.search != "" {
 		conds = append(conds, "LOWER(filename) LIKE LOWER(?)")
 		args = append(args, "%"+params.search+"%")
+	}
+	if params.year > 0 {
+		start := time.Date(params.year, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano()
+		end := time.Date(params.year+1, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano()
+		conds = append(conds, "date_taken >= ? AND date_taken < ?")
+		args = append(args, start, end)
+	}
+	if params.ownerFolders != nil {
+		if len(params.ownerFolders) == 0 {
+			conds = append(conds, "1=0")
+		} else {
+			parts := make([]string, 0, len(params.ownerFolders))
+			for _, f := range params.ownerFolders {
+				parts = append(parts, "(folder = ? OR folder LIKE ?||'/%')")
+				args = append(args, f, f)
+			}
+			conds = append(conds, "("+strings.Join(parts, " OR ")+")")
+		}
 	}
 	for _, d := range params.deniedTopFolders {
 		conds = append(conds, "folder <> ? AND folder NOT LIKE ?||'/%'")
