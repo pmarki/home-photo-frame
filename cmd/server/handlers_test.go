@@ -490,6 +490,130 @@ func TestHandleImages(t *testing.T) {
 		}
 	})
 
+	t.Run("search by natural-language date", func(t *testing.T) {
+		setupTestEnv(t)
+		// Seeds spanning several months of 2010 plus one adjacent-year outlier.
+		// beach.jpg intentionally sits in Feb 2010 so we can also verify the
+		// OR-with-filename semantics (search=beach matches both filename and date).
+		rows := []struct {
+			path string
+			ts   time.Time
+		}{
+			{"beach.jpg", time.Date(2010, 2, 15, 0, 0, 0, 0, time.UTC)},
+			{"jan.jpg", time.Date(2010, 1, 10, 0, 0, 0, 0, time.UTC)},
+			{"apr.jpg", time.Date(2010, 4, 10, 0, 0, 0, 0, time.UTC)},
+			{"oct.jpg", time.Date(2010, 10, 10, 0, 0, 0, 0, time.UTC)},
+			{"dec.jpg", time.Date(2010, 12, 20, 0, 0, 0, 0, time.UTC)},
+			{"other-year.jpg", time.Date(2011, 2, 15, 0, 0, 0, 0, time.UTC)},
+		}
+		for _, r := range rows {
+			db.Exec(`INSERT INTO files (path,filename,folder,file_type,width,height,size,file_mtime,date_taken,indexed_at) VALUES (?,?,'','image',0,0,0,?,?,?)`, //nolint:errcheck
+				r.path, r.path, r.ts.UnixNano(), r.ts.UnixNano(), r.ts.UnixNano())
+		}
+
+		pathsFor := func(url string) map[string]bool {
+			rr := doRequest(handleImages, http.MethodGet, url, nil, "")
+			var resp ListResponse
+			json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+			out := make(map[string]bool, len(resp.Images))
+			for _, img := range resp.Images {
+				out[img.Path] = true
+			}
+			return out
+		}
+
+		// "luty 2010" — Feb 2010 → beach.jpg (also matches filename OR)
+		got := pathsFor("/api/images?search=luty+2010")
+		if !got["beach.jpg"] || len(got) != 1 {
+			t.Errorf("search=luty+2010 = %v, want {beach.jpg}", got)
+		}
+		// numeric "2.2010" — same result
+		got = pathsFor("/api/images?search=2.2010")
+		if !got["beach.jpg"] || len(got) != 1 {
+			t.Errorf("search=2.2010 = %v, want {beach.jpg}", got)
+		}
+		// "zima 2010" — Jan + Feb + Dec of 2010
+		got = pathsFor("/api/images?search=zima+2010")
+		want := map[string]bool{"jan.jpg": true, "beach.jpg": true, "dec.jpg": true}
+		if len(got) != len(want) {
+			t.Errorf("search=zima+2010 = %v, want %v", got, want)
+		}
+		for p := range want {
+			if !got[p] {
+				t.Errorf("search=zima+2010 missing %s (got %v)", p, got)
+			}
+		}
+		// OR-with-filename: "beach" still matches by filename regardless of date parse.
+		got = pathsFor("/api/images?search=beach")
+		if !got["beach.jpg"] || len(got) != 1 {
+			t.Errorf("search=beach = %v, want {beach.jpg}", got)
+		}
+	})
+
+	t.Run("search by season without year matches all years", func(t *testing.T) {
+		setupTestEnv(t)
+		rows := []struct {
+			path string
+			ts   time.Time
+		}{
+			// Winter months across three different years
+			{"y2010_jan.jpg", time.Date(2010, 1, 15, 12, 0, 0, 0, time.UTC)},
+			{"y2010_feb.jpg", time.Date(2010, 2, 15, 12, 0, 0, 0, time.UTC)},
+			{"y2010_dec.jpg", time.Date(2010, 12, 15, 12, 0, 0, 0, time.UTC)},
+			{"y2015_feb.jpg", time.Date(2015, 2, 15, 12, 0, 0, 0, time.UTC)},
+			{"y2020_dec.jpg", time.Date(2020, 12, 15, 12, 0, 0, 0, time.UTC)},
+			// Non-winter photos that should NOT match "zima"
+			{"y2010_apr.jpg", time.Date(2010, 4, 15, 12, 0, 0, 0, time.UTC)},
+			{"y2015_jul.jpg", time.Date(2015, 7, 15, 12, 0, 0, 0, time.UTC)},
+			{"y2020_oct.jpg", time.Date(2020, 10, 15, 12, 0, 0, 0, time.UTC)},
+		}
+		for _, r := range rows {
+			db.Exec(`INSERT INTO files (path,filename,folder,file_type,width,height,size,file_mtime,date_taken,indexed_at) VALUES (?,?,'','image',0,0,0,?,?,?)`, //nolint:errcheck
+				r.path, r.path, r.ts.UnixNano(), r.ts.UnixNano(), r.ts.UnixNano())
+		}
+
+		pathsFor := func(url string) map[string]bool {
+			rr := doRequest(handleImages, http.MethodGet, url, nil, "")
+			var resp ListResponse
+			json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+			out := make(map[string]bool, len(resp.Images))
+			for _, img := range resp.Images {
+				out[img.Path] = true
+			}
+			return out
+		}
+
+		// zima → Jan, Feb, Dec of every year
+		got := pathsFor("/api/images?search=zima")
+		want := map[string]bool{
+			"y2010_jan.jpg": true,
+			"y2010_feb.jpg": true,
+			"y2010_dec.jpg": true,
+			"y2015_feb.jpg": true,
+			"y2020_dec.jpg": true,
+		}
+		if len(got) != len(want) {
+			t.Errorf("search=zima returned %d rows, want %d — got=%v", len(got), len(want), got)
+		}
+		for p := range want {
+			if !got[p] {
+				t.Errorf("search=zima missing %s (got %v)", p, got)
+			}
+		}
+
+		// lato → Jun/Jul/Aug of every year (only y2015_jul.jpg here)
+		got = pathsFor("/api/images?search=lato")
+		if len(got) != 1 || !got["y2015_jul.jpg"] {
+			t.Errorf("search=lato = %v, want {y2015_jul.jpg}", got)
+		}
+
+		// jesien → Sep/Oct/Nov of every year (only y2020_oct.jpg here)
+		got = pathsFor("/api/images?search=jesien")
+		if len(got) != 1 || !got["y2020_oct.jpg"] {
+			t.Errorf("search=jesien = %v, want {y2020_oct.jpg}", got)
+		}
+	})
+
 	t.Run("filter by year", func(t *testing.T) {
 		setupTestEnv(t)
 		rows := []struct {

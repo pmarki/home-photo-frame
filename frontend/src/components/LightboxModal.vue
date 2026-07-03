@@ -61,6 +61,18 @@
             <polyline points="2 6 18 6 18 22"/>
           </svg>
         </button>
+        <!-- Favorite -->
+        <button
+          :class="['lb-icon-btn', { 'lb-icon-btn--fav-on': !!currentImage.favorited }]"
+          :title="currentImage.favorited ? 'Unfavorite' : 'Favorite'"
+          :aria-label="currentImage.favorited ? 'Unfavorite' : 'Favorite'"
+          :aria-pressed="!!currentImage.favorited"
+          @click="onFavoriteClick"
+        >
+          <svg viewBox="0 0 24 24" width="20" height="20" :fill="currentImage.favorited ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+          </svg>
+        </button>
         <button class="lb-icon-btn" title="Close (Esc)" @click="onCloseClick">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="18" y1="6" x2="6" y2="18"/>
@@ -169,7 +181,7 @@ const props = defineProps({
   hasMore:      { type: Boolean, default: false }
 })
 
-const emit = defineEmits(['close', 'need-more', 'deleted', 'cropped', 'request-menu'])
+const emit = defineEmits(['close', 'need-more', 'deleted', 'cropped', 'request-menu', 'toggle-favorite'])
 
 const stageRef     = ref(null)
 const imgRef       = ref(null)
@@ -302,6 +314,12 @@ function onPanEnd(e) {
 
 function onCloseClick() {
   emit('close')
+}
+
+function onFavoriteClick() {
+  const img = currentImage.value
+  if (!img?.path) return
+  emit('toggle-favorite', img)
 }
 
 function onOverlayClick() {
@@ -692,6 +710,8 @@ onUnmounted(() => {
 .lb-icon-btn:disabled { opacity: 0.4; cursor: default; }
 .lb-icon-btn--danger { background: rgba(220, 60, 60, 0.25); color: #f87171; }
 .lb-icon-btn--danger:hover { background: rgba(220, 60, 60, 0.4); color: #fca5a5; }
+.lb-icon-btn--fav-on { color: #ff5b7b; }
+.lb-icon-btn--fav-on:hover { color: #ff7c95; background: rgba(255,255,255,0.18); }
 
 /* ─── Stage (image + nav arrows) ──────────────────────────────────── */
 .lb-stage {

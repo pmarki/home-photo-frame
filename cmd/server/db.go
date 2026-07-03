@@ -34,6 +34,24 @@ CREATE INDEX IF NOT EXISTS idx_files_file_type  ON files(file_type);
 CREATE INDEX IF NOT EXISTS idx_files_date_taken ON files(date_taken);
 CREATE INDEX IF NOT EXISTS idx_files_file_mtime ON files(file_mtime);
 CREATE INDEX IF NOT EXISTS idx_files_filename   ON files(filename);
+
+CREATE TABLE IF NOT EXISTS file_views (
+	file_path      TEXT    NOT NULL,
+	user_id        TEXT    NOT NULL DEFAULT '',
+	view_count     INTEGER NOT NULL DEFAULT 0,
+	last_viewed_at INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (file_path, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_file_views_user_recent ON file_views(user_id, last_viewed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_file_views_user_count  ON file_views(user_id, view_count    DESC);
+
+CREATE TABLE IF NOT EXISTS file_favorites (
+	file_path    TEXT    NOT NULL,
+	user_id      TEXT    NOT NULL DEFAULT '',
+	favorited_at INTEGER NOT NULL,
+	PRIMARY KEY (file_path, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_file_favorites_user ON file_favorites(user_id, favorited_at DESC);
 `
 
 func openDB(dbDir string) (*sql.DB, error) {
@@ -102,25 +120,74 @@ func upsertFile(imgPath string, fi os.FileInfo, dateTaken time.Time, w, h int) e
 	return err
 }
 
-// deleteFile removes a file record from the database.
+// deleteFile removes a file record from the database. Also clears any view
+// history and favorite rows for the path — those are keyed by path and would
+// otherwise linger as phantom rows.
 func deleteFile(imgPath string) {
 	if _, err := db.Exec(`DELETE FROM files WHERE path = ?`, imgPath); err != nil {
 		log.Printf("db: delete %s: %v", imgPath, err)
 	}
+	if _, err := db.Exec(`DELETE FROM file_views WHERE file_path = ?`, imgPath); err != nil {
+		log.Printf("db: delete views for %s: %v", imgPath, err)
+	}
+	if _, err := db.Exec(`DELETE FROM file_favorites WHERE file_path = ?`, imgPath); err != nil {
+		log.Printf("db: delete favorites for %s: %v", imgPath, err)
+	}
+}
+
+// setFavorite records or removes a favorite for (imgPath, userID). Insert is
+// idempotent — re-favoriting is a no-op. Delete on a missing row is also fine.
+func setFavorite(imgPath, userID string, fav bool) error {
+	if fav {
+		_, err := db.Exec(`
+			INSERT INTO file_favorites (file_path, user_id, favorited_at)
+			VALUES (?, ?, ?)
+			ON CONFLICT(file_path, user_id) DO NOTHING`,
+			imgPath, userID, time.Now().UnixNano())
+		return err
+	}
+	_, err := db.Exec(`DELETE FROM file_favorites WHERE file_path = ? AND user_id = ?`, imgPath, userID)
+	return err
+}
+
+// trackView records that user u viewed imgPath. When u is nil (feature
+// disabled or unauthenticated route) the view is stored under an empty user id.
+// Intended to be called from safeGo; errors are logged, not returned.
+func trackView(imgPath string, u *ConfigUser) {
+	uid := ""
+	if u != nil {
+		uid = u.ID
+	}
+	_, err := db.Exec(`
+		INSERT INTO file_views (file_path, user_id, view_count, last_viewed_at)
+		VALUES (?, ?, 1, ?)
+		ON CONFLICT(file_path, user_id) DO UPDATE SET
+			view_count     = view_count + 1,
+			last_viewed_at = excluded.last_viewed_at`,
+		imgPath, uid, time.Now().UnixNano())
+	if err != nil {
+		log.Printf("trackView %s (%s): %v", imgPath, uid, err)
+	}
 }
 
 // lookupFile loads a single ImageInfo by path. Returns sql.ErrNoRows if the
-// record is missing.
-func lookupFile(imgPath string) (ImageInfo, error) {
+// record is missing. userID scopes the Favorited field to that user (empty
+// string for the anonymous/no-users case).
+func lookupFile(imgPath, userID string) (ImageInfo, error) {
 	var (
-		filename                    string
-		mtimeNs, dateTakenNs, size  int64
-		w, h                        int
+		filename                   string
+		mtimeNs, dateTakenNs, size int64
+		w, h                       int
+		favorited                  bool
 	)
 	err := db.QueryRow(
-		`SELECT filename, file_mtime, date_taken, size, width, height
-		   FROM files WHERE path = ?`, imgPath,
-	).Scan(&filename, &mtimeNs, &dateTakenNs, &size, &w, &h)
+		`SELECT files.filename, files.file_mtime, files.date_taken, files.size,
+		        files.width, files.height,
+		        ff.favorited_at IS NOT NULL
+		   FROM files
+		   LEFT JOIN file_favorites ff ON ff.file_path = files.path AND ff.user_id = ?
+		  WHERE files.path = ?`, userID, imgPath,
+	).Scan(&filename, &mtimeNs, &dateTakenNs, &size, &w, &h, &favorited)
 	if err != nil {
 		return ImageInfo{}, err
 	}
@@ -137,6 +204,7 @@ func lookupFile(imgPath string) (ImageInfo, error) {
 		ThumbSmall:  small,
 		ThumbMedium: medium,
 		Original:    original,
+		Favorited:   favorited,
 	}, nil
 }
 
@@ -153,6 +221,9 @@ type queryParams struct {
 	limit            int
 	paginate         bool
 	deniedTopFolders []string // top folders to exclude (any file under these is hidden); empty = no restriction
+	viewedMode       string   // "" (off), "recent" (last_viewed_at DESC), "most" (view_count DESC). When set, INNER JOIN file_views scoped to userID — only viewed files are returned, and sort/order are ignored.
+	favorited        bool     // when true, only rows favorited by userID are returned
+	userID           string   // user id used to scope viewedMode/favorited/Favorited; "" for anonymous
 }
 
 // queryFiles runs a filtered, sorted, paginated query against the files table.
@@ -160,6 +231,23 @@ type queryParams struct {
 func queryFiles(params queryParams) ([]ImageInfo, int, error) {
 	var conds []string
 	var args []any
+
+	// Always LEFT JOIN file_favorites scoped to the current user so we can
+	// surface the Favorited field on every row without an N+1. The join is a
+	// keyed lookup on (file_path, user_id) — cheap.
+	joinClause := "LEFT JOIN file_favorites ff ON ff.file_path = files.path AND ff.user_id = ?"
+	args = append(args, params.userID)
+
+	// When filtering by viewed mode, additionally INNER JOIN file_views scoped
+	// to the current user. Its arg comes after the favorites-join arg.
+	if params.viewedMode != "" {
+		joinClause += " INNER JOIN file_views fv ON fv.file_path = files.path AND fv.user_id = ?"
+		args = append(args, params.userID)
+	}
+
+	if params.favorited {
+		conds = append(conds, "ff.favorited_at IS NOT NULL")
+	}
 
 	if params.folder != "" {
 		conds = append(conds, "(folder = ? OR folder LIKE ?||'/%')")
@@ -170,8 +258,26 @@ func queryFiles(params queryParams) ([]ImageInfo, int, error) {
 		args = append(args, params.ftype)
 	}
 	if params.search != "" {
-		conds = append(conds, "LOWER(filename) LIKE LOWER(?)")
+		parts := []string{"LOWER(filename) LIKE LOWER(?)"}
 		args = append(args, "%"+params.search+"%")
+		if dq := parseDateQuery(params.search); dq != nil {
+			for _, r := range dq.ranges {
+				parts = append(parts, "(date_taken >= ? AND date_taken < ?)")
+				args = append(args, r.startNs, r.endNs)
+			}
+			if len(dq.months) > 0 {
+				// Season-only queries match a set of months across all years.
+				// date_taken is UnixNano; divide to seconds for strftime.
+				// Not indexable — acceptable at gallery scale.
+				placeholders := make([]string, len(dq.months))
+				for i, m := range dq.months {
+					placeholders[i] = "?"
+					args = append(args, m)
+				}
+				parts = append(parts, "CAST(strftime('%m', date_taken / 1000000000, 'unixepoch') AS INTEGER) IN ("+strings.Join(placeholders, ",")+")")
+			}
+		}
+		conds = append(conds, "("+strings.Join(parts, " OR ")+")")
 	}
 	if params.year > 0 {
 		start := time.Date(params.year, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano()
@@ -201,24 +307,32 @@ func queryFiles(params queryParams) ([]ImageInfo, int, error) {
 		where = "WHERE " + strings.Join(conds, " AND ")
 	}
 
-	var orderCol string
-	switch params.sort {
-	case "name":
-		orderCol = "path"
-	case "mtime":
-		orderCol = "file_mtime"
+	var orderClause string
+	switch params.viewedMode {
+	case "recent":
+		orderClause = "ORDER BY fv.last_viewed_at DESC, files.path ASC"
+	case "most":
+		orderClause = "ORDER BY fv.view_count DESC, fv.last_viewed_at DESC, files.path ASC"
 	default:
-		orderCol = "date_taken"
+		var orderCol string
+		switch params.sort {
+		case "name":
+			orderCol = "path"
+		case "mtime":
+			orderCol = "file_mtime"
+		default:
+			orderCol = "date_taken"
+		}
+		dir := "DESC"
+		if params.order == "asc" {
+			dir = "ASC"
+		}
+		orderClause = fmt.Sprintf("ORDER BY %s %s, path ASC", orderCol, dir)
 	}
-	dir := "DESC"
-	if params.order == "asc" {
-		dir = "ASC"
-	}
-	orderClause := fmt.Sprintf("ORDER BY %s %s, path ASC", orderCol, dir)
 
 	var total int
 	if err := db.QueryRow(
-		fmt.Sprintf("SELECT COUNT(*) FROM files %s", where), args...,
+		fmt.Sprintf("SELECT COUNT(*) FROM files %s %s", joinClause, where), args...,
 	).Scan(&total); err != nil {
 		return nil, 0, err
 	}
@@ -229,8 +343,8 @@ func queryFiles(params queryParams) ([]ImageInfo, int, error) {
 	}
 
 	q := fmt.Sprintf(
-		"SELECT path, filename, file_mtime, date_taken, size, width, height FROM files %s %s %s",
-		where, orderClause, limitClause,
+		"SELECT files.path, filename, file_mtime, date_taken, size, width, height, ff.favorited_at IS NOT NULL FROM files %s %s %s %s",
+		joinClause, where, orderClause, limitClause,
 	)
 	rows, err := db.Query(q, args...)
 	if err != nil {
@@ -243,7 +357,8 @@ func queryFiles(params queryParams) ([]ImageInfo, int, error) {
 		var imgPath, filename string
 		var mtimeNs, dateTakenNs, size int64
 		var w, h int
-		if err := rows.Scan(&imgPath, &filename, &mtimeNs, &dateTakenNs, &size, &w, &h); err != nil {
+		var favorited bool
+		if err := rows.Scan(&imgPath, &filename, &mtimeNs, &dateTakenNs, &size, &w, &h, &favorited); err != nil {
 			return nil, 0, err
 		}
 		mtime := time.Unix(0, mtimeNs)
@@ -259,6 +374,7 @@ func queryFiles(params queryParams) ([]ImageInfo, int, error) {
 			ThumbSmall:  small,
 			ThumbMedium: medium,
 			Original:    original,
+			Favorited:   favorited,
 		})
 	}
 	return images, total, rows.Err()

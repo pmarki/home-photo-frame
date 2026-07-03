@@ -165,6 +165,7 @@ func main() {
 	mux.HandleFunc("/api/original/", handleOriginal)
 	mux.HandleFunc("/api/upload", handleUpload)
 	mux.HandleFunc("/api/crop/", handleCrop)
+	mux.HandleFunc("/api/favorite/", handleFavorite)
 	mux.HandleFunc("/api/delete", handleDelete)
 	mux.HandleFunc("/api/move", handleMove)
 	mux.HandleFunc("/api/copy", handleCopy)

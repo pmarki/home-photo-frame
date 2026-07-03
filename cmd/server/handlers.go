@@ -59,6 +59,20 @@ func handleImages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	viewed := q.Get("viewed")
+	switch viewed {
+	case "", "recent", "most":
+	default:
+		http.Error(w, "invalid viewed", http.StatusBadRequest)
+		return
+	}
+	uid := ""
+	if u != nil {
+		uid = u.ID
+	}
+
+	favorited := q.Get("favorited") == "1" || strings.EqualFold(q.Get("favorited"), "true")
+
 	params := queryParams{
 		folder:           folder,
 		ftype:            q.Get("type"),
@@ -71,6 +85,9 @@ func handleImages(w http.ResponseWriter, r *http.Request) {
 		limit:            limit,
 		paginate:         paginate,
 		deniedTopFolders: deniedTopFoldersFor(u),
+		viewedMode:       viewed,
+		favorited:        favorited,
+		userID:           uid,
 	}
 
 	images, total, err := queryFiles(params)
@@ -111,10 +128,12 @@ func handleOriginal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid path", http.StatusBadRequest)
 		return
 	}
-	if !userCanAccessPath(userFromCtx(r), imgPath) {
+	u := userFromCtx(r)
+	if !userCanAccessPath(u, imgPath) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	safeGo("trackView-original", func() { trackView(imgPath, u) })
 	w.Header().Set("Cache-Control", cacheControlForHashedURL(imgPath, urlHash))
 	http.ServeFile(w, r, filepath.Join(photosDir, filepath.FromSlash(imgPath)))
 }
@@ -792,7 +811,11 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 	os.Remove(thumbMediumCachePath(imgPath))
 	indexFileRecord(imgPath, b.Dx(), b.Dy())
 
-	info, err := lookupFile(imgPath)
+	uid := ""
+	if u := userFromCtx(r); u != nil {
+		uid = u.ID
+	}
+	info, err := lookupFile(imgPath, uid)
 	if err != nil {
 		http.Error(w, "failed to load cropped record", http.StatusInternalServerError)
 		return
@@ -802,6 +825,40 @@ func handleCrop(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info) //nolint:errcheck
+}
+
+func handleFavorite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	imgPath := strings.TrimPrefix(r.URL.Path, "/api/favorite/")
+	if !isValidPath(imgPath) {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	u := userFromCtx(r)
+	if !userCanAccessPath(u, imgPath) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var body struct {
+		Favorited bool `json:"favorited"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	uid := ""
+	if u != nil {
+		uid = u.ID
+	}
+	if err := setFavorite(imgPath, uid, body.Favorited); err != nil {
+		log.Printf("favorite: %s (%s): %v", imgPath, uid, err)
+		http.Error(w, "failed to update favorite", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func handleFolders(w http.ResponseWriter, r *http.Request) {

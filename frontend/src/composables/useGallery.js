@@ -17,20 +17,29 @@ function readFolderFromUrl() {
   return m ? decodeURI(m[1]) : ''
 }
 
+const VALID_VIEWED = new Set(['', 'recent', 'most'])
+
 function readFiltersFromUrl() {
   const q = new URLSearchParams(window.location.search)
+  const viewed = q.get('viewed') || ''
   return {
     owner: q.get('owner') || '',
     year: Number(q.get('year')) || 0,
     type: q.get('type') || '',
+    viewed: VALID_VIEWED.has(viewed) ? viewed : '',
+    favorited: q.get('favorited') === '1',
+    search: q.get('search') || '',
   }
 }
 
 function writeFiltersToUrl(filters) {
   const q = new URLSearchParams(window.location.search)
-  if (filters.owner) q.set('owner', filters.owner); else q.delete('owner')
-  if (filters.year)  q.set('year', String(filters.year)); else q.delete('year')
-  if (filters.type)  q.set('type', filters.type); else q.delete('type')
+  if (filters.owner)     q.set('owner', filters.owner);       else q.delete('owner')
+  if (filters.year)      q.set('year', String(filters.year)); else q.delete('year')
+  if (filters.type)      q.set('type', filters.type);         else q.delete('type')
+  if (filters.viewed)    q.set('viewed', filters.viewed);     else q.delete('viewed')
+  if (filters.favorited) q.set('favorited', '1');             else q.delete('favorited')
+  if (filters.search)    q.set('search', filters.search);     else q.delete('search')
   const qs = q.toString()
   const next = window.location.pathname + (qs ? '?' + qs : '') + window.location.hash
   window.history.replaceState(window.history.state, '', next)
@@ -73,9 +82,12 @@ export function useGallery() {
         limit: PAGE_LIMIT,
       })
       if (folder.value) params.set('folder', folder.value)
-      if (filters.value.owner) params.set('owner', filters.value.owner)
-      if (filters.value.year)  params.set('year', String(filters.value.year))
-      if (filters.value.type)  params.set('type', filters.value.type)
+      if (filters.value.owner)     params.set('owner', filters.value.owner)
+      if (filters.value.year)      params.set('year', String(filters.value.year))
+      if (filters.value.type)      params.set('type', filters.value.type)
+      if (filters.value.viewed)    params.set('viewed', filters.value.viewed)
+      if (filters.value.favorited) params.set('favorited', '1')
+      if (filters.value.search)    params.set('search', filters.value.search)
       const res = await fetch(`/api/images?${params}`, { signal: controller.signal })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
@@ -125,6 +137,11 @@ export function useGallery() {
     if (idx !== -1) images.value.splice(idx, 1, newImage)
   }
 
+  function setFavorited(path, favorited) {
+    const idx = images.value.findIndex(img => img?.path === path)
+    if (idx !== -1) images.value[idx] = { ...images.value[idx], favorited }
+  }
+
   function resetState() {
     generation++
     currentController?.abort()
@@ -164,9 +181,12 @@ export function useGallery() {
 
   async function setFilters(partial) {
     const next = { ...filters.value, ...partial }
-    if (next.owner === filters.value.owner &&
-        next.year  === filters.value.year &&
-        next.type  === filters.value.type) return
+    if (next.owner     === filters.value.owner &&
+        next.year      === filters.value.year &&
+        next.type      === filters.value.type &&
+        next.viewed    === filters.value.viewed &&
+        next.favorited === filters.value.favorited &&
+        next.search    === filters.value.search) return
     filters.value = next
     writeFiltersToUrl(next)
     resetState()
@@ -188,6 +208,7 @@ export function useGallery() {
     setFilters,
     removeImage,
     replaceImage,
+    setFavorited,
     forceReload,
   }
 }

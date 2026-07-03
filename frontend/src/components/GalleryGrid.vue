@@ -58,6 +58,31 @@
             </svg>
           </span>
           <div v-if="isVideo(img.filename)" class="video-badge" aria-hidden="true">▶</div>
+          <button
+            type="button"
+            class="fav-btn"
+            :class="{ 'fav-on': !!img.favorited }"
+            :title="img.favorited ? 'Unfavorite' : 'Favorite'"
+            :aria-label="img.favorited ? 'Unfavorite' : 'Favorite'"
+            :aria-pressed="!!img.favorited"
+            @click.stop="onFavClick(img)"
+            @touchstart.stop
+            @touchend.stop
+            @touchcancel.stop
+            @contextmenu.stop.prevent
+          >
+            <svg
+              viewBox="0 0 24 24"
+              :fill="img.favorited ? 'currentColor' : 'none'"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+            </svg>
+          </button>
           <div class="gallery-overlay" aria-hidden="true">
             <span class="gallery-name">{{ img.filename }}</span>
             <span v-if="folderOf(img.path)" class="gallery-folder">
@@ -119,7 +144,7 @@ const props = defineProps({
   viewMode: { type: String,  default: 'gallery' },
 })
 
-const emit = defineEmits(['open', 'request-menu'])
+const emit = defineEmits(['open', 'request-menu', 'toggle-favorite'])
 
 const selection = useImageSelection()
 
@@ -258,6 +283,13 @@ function onTileTouchEnd() {
   pressedImage = null
 }
 
+function onFavClick(image) {
+  // Prevent the outer tile click (which would open the lightbox) via
+  // suppressClickUntil, and stop long-press-triggered menus.
+  suppressClickUntil = Date.now() + 400
+  emit('toggle-favorite', image)
+}
+
 function onTileClick(index, image) {
   if (Date.now() < suppressClickUntil) {
     suppressClickUntil = 0
@@ -379,6 +411,69 @@ function onTileClick(index, image) {
   justify-content: center;
   pointer-events: none;
   padding-left: 2px;
+}
+
+/* ─── Favorite button ─────────────────────────────────────────────── */
+.fav-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.4);
+  color: rgba(255, 255, 255, 0.8);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 4;
+  transition: background 0.15s, color 0.15s, transform 0.1s;
+  -webkit-tap-highlight-color: transparent;
+}
+.fav-btn svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+.fav-btn:hover,
+.fav-btn:focus-visible {
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  outline: none;
+}
+.fav-btn:active {
+  transform: scale(0.9);
+}
+.fav-btn.fav-on {
+  color: #ff5b7b;
+}
+.fav-btn.fav-on:hover,
+.fav-btn.fav-on:focus-visible {
+  color: #ff7c95;
+}
+/* Hide the top-right heart in select-mode so it doesn't collide with the
+   selected-check badge (which uses ::after in the same corner). */
+.gallery-item.select-mode .fav-btn,
+.gallery-item.tile-selected .fav-btn { display: none; }
+
+/* Browser mode: shrink and move to the far right of the row. */
+.mode-browser .fav-btn {
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  width: 32px;
+  height: 32px;
+  background: transparent;
+}
+.mode-browser .fav-btn:hover,
+.mode-browser .fav-btn:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+}
+.mode-browser .fav-btn:active {
+  transform: translateY(-50%) scale(0.9);
 }
 
 .orientation-badge {

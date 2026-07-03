@@ -194,6 +194,15 @@ func handleThumb(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleThumbMedium(w http.ResponseWriter, r *http.Request) {
+	// Medium thumbs are only requested when the lightbox opens, so a hit here
+	// is a reliable proxy for "user viewed this file". Small thumbs are used
+	// for grid scrolling and are deliberately not tracked.
+	if _, imgPath, ok := parseThumbPath("/api/thumb-medium/", r.URL.Path); ok {
+		if userCanAccessPath(userFromCtx(r), imgPath) {
+			u := userFromCtx(r)
+			safeGo("trackView-thumb-medium", func() { trackView(imgPath, u) })
+		}
+	}
 	serveCachedThumb(w, r,
 		"/api/thumb-medium/", thumbMediumCachePath,
 		func(img image.Image) image.Image {

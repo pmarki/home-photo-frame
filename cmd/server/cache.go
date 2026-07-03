@@ -23,6 +23,7 @@ type ImageInfo struct {
 	ThumbSmall  string    `json:"thumbSmall"`
 	ThumbMedium string    `json:"thumbMedium"`
 	Original    string    `json:"original"`
+	Favorited   bool      `json:"favorited"`
 }
 
 type ListResponse struct {

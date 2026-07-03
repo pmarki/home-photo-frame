@@ -96,6 +96,103 @@
       </ul>
     </div>
 
+    <!-- Viewed (recently / most) -->
+    <div class="filter-chip-wrap">
+      <button
+        class="sort-icon-btn filter-chip"
+        :class="{ active: !!value.viewed }"
+        :title="viewedLabel"
+        :aria-label="viewedLabel"
+        :aria-expanded="openChip === 'viewed'"
+        @click.stop="toggle('viewed')"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+        <span v-if="value.viewed" class="chip-label">{{ viewedDisplay }}</span>
+      </button>
+      <ul v-if="openChip === 'viewed'" class="filter-popover" role="listbox" @click.stop>
+        <li>
+          <button class="filter-option" :class="{ selected: !value.viewed }" @click="pick('viewed', '')">Any</button>
+        </li>
+        <li>
+          <button class="filter-option" :class="{ selected: value.viewed === 'recent' }" @click="pick('viewed', 'recent')">Recently viewed</button>
+        </li>
+        <li>
+          <button class="filter-option" :class="{ selected: value.viewed === 'most' }" @click="pick('viewed', 'most')">Most viewed</button>
+        </li>
+      </ul>
+    </div>
+
+    <!-- Favorites (toggle only, no popover) -->
+    <div class="filter-chip-wrap">
+      <button
+        class="sort-icon-btn filter-chip"
+        :class="{ active: !!value.favorited }"
+        :title="favoritedLabel"
+        :aria-label="favoritedLabel"
+        :aria-pressed="!!value.favorited"
+        @click.stop="onFavoritedClick"
+      >
+        <svg
+          viewBox="0 0 24 24"
+          :fill="value.favorited ? 'currentColor' : 'none'"
+          stroke="currentColor"
+          stroke-width="1.8"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 1 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+        </svg>
+        <span v-if="value.favorited" class="chip-label">Favorites</span>
+      </button>
+    </div>
+
+    <!-- Search (last in the row, pushed to the right) -->
+    <div class="filter-chip-wrap filter-chip-wrap-right">
+      <button
+        class="sort-icon-btn filter-chip"
+        :class="{ active: !!value.search }"
+        :title="searchLabel"
+        :aria-label="searchLabel"
+        :aria-expanded="openChip === 'search'"
+        @click.stop="onSearchOpen"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7"/>
+          <line x1="20" y1="20" x2="16.5" y2="16.5"/>
+        </svg>
+        <span v-if="value.search" class="chip-label">{{ searchDisplay }}</span>
+      </button>
+      <div v-if="openChip === 'search'" class="filter-popover filter-popover-search" role="dialog" @click.stop>
+        <input
+          ref="searchInputEl"
+          :value="searchInput"
+          type="search"
+          class="fb-search-input"
+          placeholder="Search (e.g. luty 2010, zima)"
+          aria-label="Search photos"
+          autocomplete="off"
+          @input="onSearchType($event.target.value)"
+          @keydown.enter.prevent="onSearchCommit"
+          @keydown.esc.prevent="onSearchEsc"
+        />
+        <button
+          v-if="searchInput"
+          class="fb-search-clear"
+          type="button"
+          aria-label="Clear search"
+          @click="onSearchClear"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="6" y1="6" x2="18" y2="18"/>
+            <line x1="18" y1="6" x2="6" y2="18"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
     <!-- Clear all (only when something is set) -->
     <button
       v-if="hasAny"
@@ -113,7 +210,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 
 const props = defineProps({
   users: { type: Array, default: () => [] },
@@ -129,7 +226,63 @@ const openChip = ref(null)
 const barEl = ref(null)
 
 const showPerson = computed(() => props.users && props.users.length > 0)
-const hasAny = computed(() => !!props.value.owner || !!props.value.year || !!props.value.type)
+const hasAny = computed(() => !!props.value.owner || !!props.value.year || !!props.value.type || !!props.value.viewed || !!props.value.favorited || !!props.value.search)
+
+const searchInputEl = ref(null)
+const searchInput = ref(props.value.search || '')
+let searchDebounce = null
+
+// Sync local input if the parent's search changes (e.g. URL, clear-all).
+watch(() => props.value.search, v => { searchInput.value = v || '' })
+
+const searchLabel = computed(() =>
+  props.value.search ? `Search: ${props.value.search}` : 'Search'
+)
+const searchDisplay = computed(() => {
+  const s = props.value.search || ''
+  return s.length > 20 ? s.slice(0, 20) + '…' : s
+})
+
+function onSearchOpen() {
+  const opening = openChip.value !== 'search'
+  toggle('search')
+  if (opening) {
+    searchInput.value = props.value.search || ''
+    nextTick(() => searchInputEl.value?.focus())
+  }
+}
+
+function onSearchType(v) {
+  searchInput.value = v
+  if (searchDebounce) clearTimeout(searchDebounce)
+  searchDebounce = setTimeout(() => {
+    searchDebounce = null
+    if ((props.value.search || '') !== searchInput.value) {
+      emit('change', { search: searchInput.value })
+    }
+  }, 250)
+}
+
+function onSearchCommit() {
+  if (searchDebounce) { clearTimeout(searchDebounce); searchDebounce = null }
+  if ((props.value.search || '') !== searchInput.value) {
+    emit('change', { search: searchInput.value })
+  }
+  openChip.value = null
+}
+
+function onSearchEsc() {
+  if (searchDebounce) { clearTimeout(searchDebounce); searchDebounce = null }
+  searchInput.value = props.value.search || ''
+  openChip.value = null
+}
+
+function onSearchClear() {
+  if (searchDebounce) { clearTimeout(searchDebounce); searchDebounce = null }
+  searchInput.value = ''
+  emit('change', { search: '' })
+  nextTick(() => searchInputEl.value?.focus())
+}
 
 function displayNameFor(u) {
   if (!u) return ''
@@ -148,6 +301,24 @@ const typeLabel = computed(() => {
   if (props.value.type === 'image') return 'Photos only'
   return 'Filter by type'
 })
+const viewedDisplay = computed(() => {
+  if (props.value.viewed === 'recent') return 'Recent'
+  if (props.value.viewed === 'most')   return 'Most'
+  return ''
+})
+const viewedLabel = computed(() => {
+  if (props.value.viewed === 'recent') return 'Recently viewed'
+  if (props.value.viewed === 'most')   return 'Most viewed'
+  return 'Filter by view history'
+})
+const favoritedLabel = computed(() =>
+  props.value.favorited ? 'Showing favorites only' : 'Show favorites only'
+)
+
+function onFavoritedClick() {
+  openChip.value = null
+  emit('change', { favorited: !props.value.favorited })
+}
 
 function toggle(chip) {
   openChip.value = openChip.value === chip ? null : chip
@@ -277,8 +448,65 @@ onUnmounted(() => {
 }
 
 .filter-clear {
+  /* Only kicks in when the search chip is hidden (no auto-margin winner) */
   margin-left: auto;
 }
+
+.filter-chip-wrap-right {
+  /* Push the search chip (and the Clear button next to it, if present) to
+     the right edge of the row. Using margin-left: auto in a flex row soaks
+     up the remaining space before this item. */
+  margin-left: auto;
+}
+/* When search is present at the right edge, Clear no longer needs the
+   auto push — sit directly next to search. */
+.filter-chip-wrap-right + .filter-clear {
+  margin-left: 0;
+}
+
+.filter-popover-search {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px;
+  min-width: 260px;
+  /* Anchor to the right edge of the chip so a search chip sitting at the
+     far right of the row doesn't overflow the viewport. */
+  left: auto;
+  right: 0;
+}
+.fb-search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  color: #e6e6ee;
+  font: inherit;
+  font-size: 16px;
+  outline: none;
+}
+.fb-search-input::placeholder { color: #888; }
+.fb-search-input:focus {
+  border-color: rgba(120, 140, 220, 0.6);
+  background: rgba(0, 0, 0, 0.45);
+}
+.fb-search-input::-webkit-search-cancel-button { display: none; }
+.fb-search-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: #aaa;
+  cursor: pointer;
+  border-radius: 6px;
+}
+.fb-search-clear svg { width: 14px; height: 14px; }
+.fb-search-clear:hover { color: #ccc; background: rgba(255, 255, 255, 0.06); }
 
 /* Mobile / small tablet: popovers become a bottom sheet so they're reachable with one thumb */
 @media (max-width: 768px) {

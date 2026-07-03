@@ -68,6 +68,7 @@
         :viewMode="viewMode"
         @open="openModal"
         @request-menu="onRequestMenu"
+        @toggle-favorite="onToggleFavorite"
       />
 
       <div v-if="error" class="error-notice">
@@ -88,6 +89,7 @@
         @deleted="onDeleted"
         @cropped="onCropped"
         @request-menu="onRequestMenu"
+        @toggle-favorite="onToggleFavorite"
       />
       <SideMenu
         v-if="sideMenuOpen"
@@ -194,7 +196,7 @@ function mixWithBlack(hex, pct) {
   return '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('')
 }
 
-const { images, total, loading, error, hasMore, viewMode, folder, filters, loadNextPage, setViewMode, setFolder, setFilters, removeImage, replaceImage, forceReload } = useGallery()
+const { images, total, loading, error, hasMore, viewMode, folder, filters, loadNextPage, setViewMode, setFolder, setFilters, removeImage, replaceImage, setFavorited, forceReload } = useGallery()
 const { userId, setUser, clearUser } = useUser()
 const showUserModal = ref(false)
 const usersList = ref([])
@@ -206,7 +208,7 @@ const currentUserName = computed(() => {
 })
 
 const filtersOpen = ref(false)
-const hasActiveFilters = computed(() => !!filters.value.owner || !!filters.value.year || !!filters.value.type)
+const hasActiveFilters = computed(() => !!filters.value.owner || !!filters.value.year || !!filters.value.type || !!filters.value.viewed || !!filters.value.favorited)
 const filterButtonVisible = computed(() => usersList.value.length > 0 || videoEnabled.value || images.value.length > 0)
 const availableYears = computed(() => {
   const seen = new Set()
@@ -227,7 +229,29 @@ function onFilterChange(partial) {
 }
 
 function onFilterClear() {
-  setFilters({ owner: '', year: 0, type: '' })
+  setFilters({ owner: '', year: 0, type: '', viewed: '', favorited: false, search: '' })
+}
+
+async function onToggleFavorite(image) {
+  if (!image?.path) return
+  const next = !image.favorited
+  // Optimistic update — flip immediately so the UI is responsive; roll back
+  // on failure. Encode each path segment so slashes stay as separators but
+  // odd characters (spaces, unicode) are safely escaped.
+  setFavorited(image.path, next)
+  try {
+    const url = '/api/favorite/' + image.path.split('/').map(encodeURIComponent).join('/')
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ favorited: next }),
+    })
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  } catch (e) {
+    setFavorited(image.path, !next)
+    showToast('Failed to update favorite')
+    console.error('favorite toggle failed', e)
+  }
 }
 
 // Keep the bar open whenever a filter is active so the user can see what's
