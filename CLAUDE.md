@@ -80,7 +80,7 @@ Vue 3 + Vite 5 SPA. Three composables drive most logic:
 - `useGallery.js` — fetches `/api/images`, manages sort/filter state, provides local image mutation helpers (used after crop/delete to update the in-memory list without a full refetch)
 - `useVirtualScroll.js` — virtual row windowing: computes which rows are visible, sizes spacer divs to maintain correct scroll height
 - `useYearScrollbar.js` — maps image index positions to year labels, tracks touch-drag state for the year handle
-- `useFastScroll.js` — scroll-speed detector (pure `nextFastScrollState` + idle timer) driving `ScrollDateTooltip`, the month/year pill under the sticky header shown only while flinging in date-ordered views
+- `useFastScroll.js` — scroll-speed detector (pure `nextFastScrollState` + idle timer) driving `ScrollDateTooltip`, the month/year pill under the sticky header — the only date indicator, shown while flinging or dragging the year scrollbar in date-ordered views
 
 ### Build embedding
 

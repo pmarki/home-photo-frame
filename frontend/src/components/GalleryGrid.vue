@@ -125,7 +125,6 @@
     :visible="yearVisible"
     :handlePos="handlePos"
     :maxScrollY="maxScrollY"
-    :getMonthLabel="getMonthLabel"
     @dragging="scrollbarDragging = $event"
   />
   <ScrollDateTooltip :label="scrollDateLabel" :visible="showScrollDate" />
@@ -178,15 +177,15 @@ const { yearItems, currentYear, visible: yearVisible, handlePos, maxScrollY, get
   dateField: yearDateField,
 })
 
-// Month/year pill under the header while scrolling fast. Suppressed while the
-// year scrollbar is dragged, since it shows its own month tooltip there.
+// Month/year pill under the header — the single date indicator, shown both
+// while flinging the gallery and while dragging the year scrollbar (which
+// scrolls the page, so scrollY tracks the dragged position).
 const { active: fastScrolling } = useFastScroll({ scrollY, viewportHeight })
 const scrollbarDragging = ref(false)
 const showScrollDate = computed(() =>
   (props.viewMode === 'gallery' || props.viewMode === 'timeline') &&
   props.chronological &&
-  fastScrolling.value &&
-  !scrollbarDragging.value
+  (fastScrolling.value || scrollbarDragging.value)
 )
 // Updated only while shown, so the text stays put during the fade-out.
 const scrollDateLabel = ref(null)
