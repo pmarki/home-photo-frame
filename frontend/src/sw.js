@@ -5,9 +5,13 @@ import { CacheFirst, NetworkFirst, StaleWhileRevalidate } from 'workbox-strategi
 import { ExpirationPlugin } from 'workbox-expiration'
 import { CacheableResponsePlugin } from 'workbox-cacheable-response'
 
-// With registerType:'autoUpdate' vite-plugin-pwa injects skipWaiting() for us;
-// clientsClaim() makes the newly-activated SW take over open tabs immediately
-// so users don't need a manual reload to get the new SW logic.
+// Activate a new SW as soon as it installs. vite-plugin-pwa only injects this
+// for generated workers; with injectManifest it's on us. Without it a new
+// version waits until every window of the app is closed — on Android an
+// installed PWA rarely is, so the old SW (and its share-target handling) kept
+// running indefinitely. clientsClaim() then takes over open tabs, and main.js
+// reloads them on controllerchange so page and SW versions match.
+self.addEventListener('install', () => self.skipWaiting())
 clientsClaim()
 
 // Injected by vite-plugin-pwa at build time

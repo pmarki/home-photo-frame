@@ -663,7 +663,11 @@ async function readSharePending(shareError) {
   try {
     const cache = await caches.open(SHARE_CACHE)
     const manifestRes = await cache.match('/share-pending/manifest')
-    if (!manifestRes) return { files: [], message: 'Shared files were not received — please share again' }
+    // Current service workers always write a report, so a missing one means an
+    // outdated worker handled the share (or storage failed).
+    if (!manifestRes) {
+      return { files: [], message: 'Shared files were not received — close the app completely, reopen it, then share again' }
+    }
     let report = await manifestRes.json()
     await cache.delete('/share-pending/manifest')
     // Service workers before share diagnostics stored a bare file list.
