@@ -132,6 +132,8 @@
         @open-new-tab="onMenuOpenNewTab"
         @save="onMenuSave"
         @share="onMenuShare"
+        @copy="onMenuCopy"
+        @move="onMenuMove"
         @select="onMenuSelect"
       />
       <SelectionToolbar
@@ -508,6 +510,7 @@ function onSelectionCopy() {
     title: 'Copy to…',
     confirmLabel: 'Copy',
     initialFolder: '',
+    pendingPaths: Array.from(selection.selectedPaths.value),
   }
 }
 
@@ -518,6 +521,33 @@ function onSelectionMove() {
     title: 'Move to…',
     confirmLabel: 'Move',
     initialFolder: '',
+    pendingPaths: Array.from(selection.selectedPaths.value),
+  }
+}
+
+function onMenuCopy() {
+  if (!contextMenu.value) return
+  const img = contextMenu.value.image
+  contextMenu.value = null
+  chooser.value = {
+    mode: 'copy',
+    title: 'Copy to…',
+    confirmLabel: 'Copy',
+    initialFolder: '',
+    pendingPaths: [img.path],
+  }
+}
+
+function onMenuMove() {
+  if (!contextMenu.value) return
+  const img = contextMenu.value.image
+  contextMenu.value = null
+  chooser.value = {
+    mode: 'move',
+    title: 'Move to…',
+    confirmLabel: 'Move',
+    initialFolder: '',
+    pendingPaths: [img.path],
   }
 }
 
@@ -543,13 +573,12 @@ async function onChooserConfirm(destination) {
       history.pushState({ modal: 'upload' }, '')
     }
   } else if (c.mode === 'copy' || c.mode === 'move') {
-    await performCopyMove(c.mode, destination)
+    await performCopyMove(c.mode, destination, c.pendingPaths)
   }
 }
 
-async function performCopyMove(action, destination) {
-  const paths = Array.from(selection.selectedPaths.value)
-  if (paths.length === 0) return
+async function performCopyMove(action, destination, paths) {
+  if (!paths || paths.length === 0) return
   try {
     const res = await fetch('/api/' + action, {
       method: 'POST',
@@ -563,7 +592,7 @@ async function performCopyMove(action, destination) {
     if (action === 'move') {
       for (const item of okList) removeImage(item.from)
     }
-    selection.exitSelectMode()
+    if (selection.selectMode.value) selection.exitSelectMode()
     forceReload()
     const verb = action === 'copy' ? 'Copied' : 'Moved'
     if (failCount === 0) showToast(verb + ' ' + okList.length)

@@ -31,7 +31,7 @@
             <polyline points="7 10 12 15 17 10"/>
             <line x1="12" y1="15" x2="12" y2="3"/>
           </svg>
-          <span>Save</span>
+          <span>Download</span>
         </button>
       </li>
       <li>
@@ -46,6 +46,27 @@
           <span>Share</span>
         </button>
       </li>
+      <li class="ctx-sep" role="separator" />
+      <li>
+        <button class="ctx-item" role="menuitem" @click="fireAction('copy')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="9" y="9" width="13" height="13" rx="2"/>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+          </svg>
+          <span>Copy to…</span>
+        </button>
+      </li>
+      <li>
+        <button class="ctx-item" role="menuitem" @click="fireAction('move')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+            <line x1="8" y1="13" x2="16" y2="13"/>
+            <polyline points="13 10 16 13 13 16"/>
+          </svg>
+          <span>Move to…</span>
+        </button>
+      </li>
+      <li class="ctx-sep" role="separator" />
       <li>
         <button class="ctx-item" role="menuitem" @click="fireAction('select')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -67,7 +88,7 @@ const props = defineProps({
   y: { type: Number, required: true },
 })
 
-const emit = defineEmits(['close', 'open-new-tab', 'save', 'share', 'select'])
+const emit = defineEmits(['close', 'open-new-tab', 'save', 'share', 'copy', 'move', 'select'])
 
 const menuEl = ref(null)
 const adjustedX = ref(props.x)
@@ -161,6 +182,12 @@ onUnmounted(() => {
 }
 
 .ctx-menu li { margin: 0; }
+
+.ctx-sep {
+  height: 1px;
+  margin: 4px 8px;
+  background: rgba(255, 255, 255, 0.1);
+}
 
 .ctx-item {
   display: flex;
