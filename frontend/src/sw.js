@@ -26,19 +26,24 @@ self.addEventListener('fetch', (event) => {
 const SHARE_CACHE = 'share-pending-v1'
 
 async function handleShareTarget(request) {
+  // The manifest entry always records what arrived — files, the form field
+  // names, or the error — so the page can explain an empty share instead of
+  // showing a generic "not received".
+  const report = { files: [], fields: [], error: null }
   try {
-    const formData = await request.formData()
-    const incoming = formData.getAll('images').filter((f) => f instanceof File)
+    const cache = await caches.open(SHARE_CACHE)
+    // Purge any stale entries left over from a previous share that was
+    // interrupted before the page could clean them up (prevents quota buildup)
+    const stale = await cache.keys()
+    await Promise.all(stale.map((k) => cache.delete(k)))
 
-    if (incoming.length > 0) {
-      const cache = await caches.open(SHARE_CACHE)
+    try {
+      const formData = await request.formData()
+      for (const [name, value] of formData.entries()) {
+        report.fields.push(value instanceof File ? `${name} (file: ${value.type || 'unknown type'})` : name)
+      }
+      const incoming = formData.getAll('images').filter((f) => f instanceof File && f.size > 0)
 
-      // Purge any stale entries left over from a previous share that was
-      // interrupted before the page could clean them up (prevents quota buildup)
-      const stale = await cache.keys()
-      await Promise.all(stale.map((k) => cache.delete(k)))
-
-      const fileInfos = []
       for (const file of incoming) {
         const key = `/share-pending/${self.crypto.randomUUID()}`
         // Pass File directly as the response body — avoids loading the entire
@@ -53,19 +58,22 @@ async function handleShareTarget(request) {
             }
           })
         )
-        fileInfos.push({ key, name: file.name, type: file.type, size: file.size })
+        report.files.push({ key, name: file.name, type: file.type, size: file.size })
       }
-
-      // Manifest entry — the Vue component reads this first
-      await cache.put(
-        '/share-pending/manifest',
-        new Response(JSON.stringify(fileInfos), {
-          headers: { 'Content-Type': 'application/json' }
-        })
-      )
+    } catch (err) {
+      console.error('[SW] share-target error:', err)
+      report.error = String(err?.message || err)
     }
+
+    // Manifest entry — App.vue reads this first
+    await cache.put(
+      '/share-pending/manifest',
+      new Response(JSON.stringify(report), {
+        headers: { 'Content-Type': 'application/json' }
+      })
+    )
   } catch (err) {
-    console.error('[SW] share-target error:', err)
+    console.error('[SW] share-target cache error:', err)
   }
 
   // Always redirect to the app; ?share-pending=1 triggers the upload UI

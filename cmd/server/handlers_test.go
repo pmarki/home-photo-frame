@@ -1316,3 +1316,14 @@ func TestHandleImagesRejectsInvalidFolder(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleShareTargetFallback(t *testing.T) {
+	setupTestEnv(t)
+	rr := doRequest(handleShareTargetFallback, http.MethodPost, "/share-target", nil, "")
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", rr.Code)
+	}
+	if loc := rr.Header().Get("Location"); loc != "/?share-pending=1&share-error=no-sw" {
+		t.Errorf("Location = %q, want the share-pending redirect flagged no-sw", loc)
+	}
+}

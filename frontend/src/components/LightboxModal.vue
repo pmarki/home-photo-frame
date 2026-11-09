@@ -174,6 +174,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import ImageCropper from './ImageCropper.vue'
 import { lockBodyOverflow, unlockBodyOverflow } from '../composables/useBodyOverflowLock.js'
+import { shareImages, shareErrorMessage, LINK_SHARED_MESSAGE } from '../composables/shareFiles.js'
 
 const props = defineProps({
   images:       { type: Array,   required: true },
@@ -400,14 +401,7 @@ async function shareOrDownload() {
   const url = img.original
   try {
     if (canShare) {
-      const res = await fetch(url)
-      const blob = await res.blob()
-      const file = new File([blob], img.filename, { type: blob.type })
-      if (navigator.canShare?.({ files: [file] })) {
-        await navigator.share({ files: [file], title: img.filename })
-      } else {
-        await navigator.share({ title: img.filename, url: window.location.origin + url })
-      }
+      if (await shareImages([img], img.filename) === 'link') showActionError(LINK_SHARED_MESSAGE)
     } else {
       // Fallback: trigger browser download of the original
       const a = document.createElement('a')
@@ -416,13 +410,16 @@ async function shareOrDownload() {
       a.click()
     }
   } catch (e) {
-    if (e.name !== 'AbortError') {
-      actionError.value = e.message || 'Share failed'
-      setTimeout(() => { actionError.value = '' }, 3000)
-    }
+    const msg = shareErrorMessage(e)
+    if (msg) showActionError(msg)
   } finally {
     sharing.value = false
   }
+}
+
+function showActionError(msg) {
+  actionError.value = msg
+  setTimeout(() => { actionError.value = '' }, 3000)
 }
 
 const currentImage = computed(() => props.images[currentIndex.value] ?? { filename: '', path: '', modTime: null })

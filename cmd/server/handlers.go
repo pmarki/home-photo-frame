@@ -982,12 +982,11 @@ func buildManifest(raw []byte) ([]byte, error) {
 
 // handleShareTargetFallback answers the manifest's share_target POST when the
 // service worker didn't intercept it (SW evicted, not yet installed, …). The
-// shared files are discarded; redirecting with ?share-pending lets the app see
-// an empty share and tell the user to retry, instead of silently serving the
-// SPA at /share-target.
+// shared files are discarded; the share-error=no-sw flag lets the app tell
+// the user why, instead of silently serving the SPA at /share-target.
 func handleShareTargetFallback(w http.ResponseWriter, r *http.Request) {
 	log.Printf("share-target: request reached server (service worker bypassed)")
-	http.Redirect(w, r, "/?share-pending=1", http.StatusSeeOther)
+	http.Redirect(w, r, "/?share-pending=1&share-error=no-sw", http.StatusSeeOther)
 }
 
 func handleManifest(w http.ResponseWriter, r *http.Request) {

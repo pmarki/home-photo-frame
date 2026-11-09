@@ -182,6 +182,7 @@ import UserSelectModal from './components/UserSelectModal.vue'
 import { useGallery } from './composables/useGallery.js'
 import { useImageSelection } from './composables/useImageSelection.js'
 import { useUser } from './composables/useUser.js'
+import { shareImages, shareErrorMessage, LINK_SHARED_MESSAGE } from './composables/shareFiles.js'
 
 function mixWithBlack(hex, pct) {
   let h = String(hex || '').trim().replace('#', '')
@@ -382,20 +383,14 @@ async function onMenuShare() {
   const absoluteUrl = window.location.origin + img.original
   try {
     if (canShare) {
-      const res = await fetch(img.original)
-      const blob = await res.blob()
-      const file = new File([blob], img.filename, { type: blob.type })
-      if (navigator.canShare?.({ files: [file] })) {
-        await navigator.share({ files: [file], title: img.filename })
-        return
-      }
-      await navigator.share({ title: img.filename, url: absoluteUrl })
+      if (await shareImages([img], img.filename) === 'link') showToast(LINK_SHARED_MESSAGE)
     } else {
       await navigator.clipboard.writeText(absoluteUrl)
       showToast('Link copied')
     }
   } catch (e) {
-    if (e.name !== 'AbortError') showToast('Share failed')
+    const msg = shareErrorMessage(e)
+    if (msg) showToast(msg)
   }
 }
 
@@ -436,22 +431,14 @@ async function onSelectionShare() {
   const urlList = imgs.map(i => window.location.origin + i.original).join('\n')
   try {
     if (canShare) {
-      const files = await Promise.all(imgs.map(async (img) => {
-        const res = await fetch(img.original)
-        const blob = await res.blob()
-        return new File([blob], img.filename, { type: blob.type })
-      }))
-      if (navigator.canShare?.({ files })) {
-        await navigator.share({ files, title: imgs.length + ' photos' })
-        return
-      }
-      await navigator.share({ title: imgs.length + ' photos', text: urlList })
+      if (await shareImages(imgs, imgs.length + ' photos') === 'link') showToast(LINK_SHARED_MESSAGE)
     } else {
       await navigator.clipboard.writeText(urlList)
       showToast(imgs.length === 1 ? 'Link copied' : imgs.length + ' links copied')
     }
   } catch (e) {
-    if (e.name !== 'AbortError') showToast('Share failed')
+    const msg = shareErrorMessage(e)
+    if (msg) showToast(msg)
   }
 }
 
@@ -626,27 +613,48 @@ function onCropped(oldPath, newImage) {
   replaceImage(oldPath, newImage)
 }
 
-async function readSharePending() {
+// readSharePending collects the files the service worker stashed for a share
+// launch. Returns { files } on success or { files: [], message } explaining
+// why nothing usable arrived.
+async function readSharePending(shareError) {
+  if (shareError === 'no-sw') {
+    // The server answered the share POST itself, so the files never reached us.
+    return { files: [], message: "Share didn't reach the app — open the app once, then share again" }
+  }
   const SHARE_CACHE = 'share-pending-v1'
   try {
     const cache = await caches.open(SHARE_CACHE)
     const manifestRes = await cache.match('/share-pending/manifest')
-    if (!manifestRes) return []
-    const fileInfos = await manifestRes.json()
+    if (!manifestRes) return { files: [], message: 'Shared files were not received — please share again' }
+    let report = await manifestRes.json()
     await cache.delete('/share-pending/manifest')
+    // Service workers before share diagnostics stored a bare file list.
+    if (Array.isArray(report)) report = { files: report, fields: [], error: null }
+
     const files = []
-    for (const info of fileInfos) {
+    for (const info of report.files) {
       const res = await cache.match(info.key)
       if (!res) continue
       const blob = await res.blob()
       files.push(new File([blob], info.name, { type: info.type }))
       await cache.delete(info.key)
     }
-    return files
+    if (files.length > 0) return { files }
+    return { files, message: describeEmptyShare(report) }
   } catch (err) {
     console.error('readSharePending failed', err)
-    return []
+    return { files: [], message: 'Could not read shared files: ' + (err?.message || err) }
   }
+}
+
+function describeEmptyShare(report) {
+  if (report.error) return 'Could not read the share: ' + report.error
+  const fields = report.fields ?? []
+  if (fields.length === 0) return 'The share arrived empty — please share again'
+  if (fields.every(f => !f.includes('(file'))) {
+    return 'Received a link, not a file — the sending app could not attach the file'
+  }
+  return 'No usable files in the share (received: ' + fields.join(', ') + ')'
 }
 
 function onCropQueueDone() {
@@ -718,11 +726,13 @@ onMounted(async () => {
 
   const url = new URL(window.location.href)
   if (url.searchParams.has('share-pending')) {
+    const shareError = url.searchParams.get('share-error')
     url.searchParams.delete('share-pending')
+    url.searchParams.delete('share-error')
     history.replaceState({ modal: null }, '', url)
-    readSharePending().then((files) => {
+    readSharePending(shareError).then(({ files, message }) => {
       if (files.length > 0) onUploadFiles(files)
-      else showToast('Shared files were not received — please share again')
+      else showToast(message)
     })
   }
   window.addEventListener('popstate', onPopState)
