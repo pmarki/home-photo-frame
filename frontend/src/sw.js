@@ -33,7 +33,10 @@ async function handleShareTarget(request) {
   // The manifest entry always records what arrived — files, the form field
   // names, or the error — so the page can explain an empty share instead of
   // showing a generic "not received".
-  const report = { files: [], fields: [], error: null }
+  // contentType tells an empty share's causes apart: multipart means the OS
+  // attached nothing; url-encoded or none means the installed app's share
+  // target predates file support and the app must be reinstalled.
+  const report = { files: [], fields: [], error: null, contentType: request.headers.get('content-type') || '' }
   try {
     const cache = await caches.open(SHARE_CACHE)
     // Purge any stale entries left over from a previous share that was

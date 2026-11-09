@@ -692,7 +692,17 @@ async function readSharePending(shareError) {
 function describeEmptyShare(report) {
   if (report.error) return 'Could not read the share: ' + report.error
   const fields = report.fields ?? []
-  if (fields.length === 0) return 'The share arrived empty — please share again'
+  if (fields.length === 0) {
+    const ct = (report.contentType ?? '').split(';')[0].trim()
+    if (ct === 'multipart/form-data') {
+      // Seen when sharing from another installed web app: the multipart form
+      // arrives with no parts at all, while shares from native apps work.
+      return 'No file arrived with the share. Sharing from another web app may not pass files — try sharing from the gallery'
+    }
+    // The installed app's share target has no file field (installed from an
+    // older manifest); Android only refreshes it on reinstall.
+    return 'The share arrived empty (' + (ct || 'no content type') + ') — reinstall the app on this phone'
+  }
   if (fields.every(f => !f.includes('(file'))) {
     return 'Received a link, not a file — the sending app could not attach the file'
   }
@@ -969,8 +979,10 @@ body {
 .toast-container {
   position: fixed;
   bottom: calc(24px + env(safe-area-inset-bottom));
-  left: 50%;
-  transform: translateX(-50%);
+  /* Full width minus gutters (not left: 50%, which would cap toasts at half
+     the screen) so long messages wrap instead of running off-screen. */
+  left: 16px;
+  right: 16px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -986,7 +998,9 @@ body {
   border-radius: 10px;
   padding: 10px 18px;
   font-size: 0.85rem;
-  white-space: nowrap;
+  max-width: 480px;
+  text-align: center;
+  overflow-wrap: anywhere;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
   animation: toast-in 0.2s ease;
 }
