@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1244,4 +1245,74 @@ func TestHandleCrop(t *testing.T) {
 			t.Errorf("status = %d, want 405", rr.Code)
 		}
 	})
+}
+
+func TestHandleUploadPixelLimit(t *testing.T) {
+	setupTestEnv(t)
+	old := maxImagePixels
+	maxImagePixels = 100
+	t.Cleanup(func() { maxImagePixels = old })
+
+	body, ct := multipartFile(t, "big.jpg", makeTestJPEG(20, 20))
+	rr := doRequest(handleUpload, http.MethodPost, "/api/upload", body, ct)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rr.Code)
+	}
+	if _, err := os.Stat(filepath.Join(photosDir, "big.jpg")); err == nil {
+		t.Error("over-limit upload was left on disk")
+	}
+}
+
+func TestHandleMoveKeepsUserData(t *testing.T) {
+	setupTestEnv(t)
+	seedFile(t, "photo.jpg", makeTestJPEG(10, 10))
+	if err := setFavorite("photo.jpg", "", true); err != nil {
+		t.Fatal(err)
+	}
+	trackView("photo.jpg", nil)
+	trackView("photo.jpg", nil)
+
+	body, _ := json.Marshal(map[string]any{"paths": []string{"photo.jpg"}, "destination": "album"})
+	rr := doRequest(handleMove, http.MethodPost, "/api/move", bytes.NewReader(body), "application/json")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body)
+	}
+
+	var favs, views int
+	db.QueryRow(`SELECT COUNT(*) FROM file_favorites WHERE file_path = 'album/photo.jpg'`).Scan(&favs) //nolint:errcheck
+	db.QueryRow(`SELECT view_count FROM file_views WHERE file_path = 'album/photo.jpg'`).Scan(&views)   //nolint:errcheck
+	if favs != 1 || views != 2 {
+		t.Errorf("after move: favorites=%d views=%d, want 1 and 2", favs, views)
+	}
+	var stale int
+	db.QueryRow(`SELECT (SELECT COUNT(*) FROM file_favorites WHERE file_path = 'photo.jpg') + (SELECT COUNT(*) FROM file_views WHERE file_path = 'photo.jpg')`).Scan(&stale) //nolint:errcheck
+	if stale != 0 {
+		t.Errorf("%d user-data rows left at the old path", stale)
+	}
+}
+
+func TestHandleOriginalOnlyServesMedia(t *testing.T) {
+	setupTestEnv(t)
+	info := seedFile(t, "p.jpg", makeTestJPEG(4, 4))
+	os.WriteFile(filepath.Join(photosDir, ".pf-123.tmp"), []byte("partial"), 0o644) //nolint:errcheck
+	os.WriteFile(filepath.Join(photosDir, "notes.txt"), []byte("secret"), 0o644)    //nolint:errcheck
+
+	if rr := doRequest(handleOriginal, http.MethodGet, info.Original, nil, ""); rr.Code != http.StatusOK {
+		t.Errorf("jpg: status = %d, want 200", rr.Code)
+	}
+	for _, p := range []string{"/api/original/h/.pf-123.tmp", "/api/original/h/notes.txt"} {
+		if rr := doRequest(handleOriginal, http.MethodGet, p, nil, ""); rr.Code != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404", p, rr.Code)
+		}
+	}
+}
+
+func TestHandleImagesRejectsInvalidFolder(t *testing.T) {
+	setupTestEnv(t)
+	for _, f := range []string{"../x", "/abs", "a//b", "a/"} {
+		rr := doRequest(handleImages, http.MethodGet, "/api/images?folder="+url.QueryEscape(f), nil, "")
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("folder %q: status = %d, want 400", f, rr.Code)
+		}
+	}
 }

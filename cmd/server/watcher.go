@@ -107,7 +107,7 @@ func cancelProcessing(imgPath string) {
 
 func dbMtimeMatches(imgPath string, mtime time.Time) bool {
 	var ns int64
-	if err := db.QueryRow(`SELECT file_mtime FROM files WHERE path = ?`, imgPath).Scan(&ns); err != nil {
+	if err := readDB().QueryRow(`SELECT file_mtime FROM files WHERE path = ?`, imgPath).Scan(&ns); err != nil {
 		return false
 	}
 	return time.Unix(0, ns).Equal(mtime)
@@ -164,6 +164,27 @@ func removeWatchRecursive(watcher *fsnotify.Watcher, root string) {
 	})
 }
 
+// evictFolder drops the database records and cached thumbnails for every file
+// under folder (a relative path), after the directory left photosDir.
+func evictFolder(folder string) {
+	if !isValidPath(folder) {
+		return // never RemoveAll the cache root
+	}
+	paths, err := deleteFolderRecords(folder)
+	if err != nil {
+		log.Printf("watcher: evict folder %s: %v", folder, err)
+		return
+	}
+	for _, p := range paths {
+		cancelProcessing(p)
+	}
+	os.RemoveAll(filepath.Join(cacheDir, "s", filepath.FromSlash(folder)))
+	os.RemoveAll(filepath.Join(cacheDir, "m", filepath.FromSlash(folder)))
+	if len(paths) > 0 {
+		log.Printf("watcher: removed folder %s (%d files)", folder, len(paths))
+	}
+}
+
 // indexNewlyArrivedDir walks a directory that just appeared (e.g. via rename/mv)
 // and indexes all supported files inside it using a 4-worker pool.
 func indexNewlyArrivedDir(dirPath string) {
@@ -175,7 +196,7 @@ func indexNewlyArrivedDir(dirPath string) {
 			if err != nil || d.IsDir() {
 				return nil
 			}
-			if !supportedExts[strings.ToLower(filepath.Ext(d.Name()))] {
+			if !isSupportedMedia(d.Name()) {
 				return nil
 			}
 			fi, err := d.Info()
@@ -246,11 +267,16 @@ func watchPhotosDir() {
 					}
 
 					// Directory removal/rename: clean up our tracked watches
-					// before the supportedExts filter drops the event. File
-					// children inside the dir arrive as their own events.
+					// before the supportedExts filter drops the event, then
+					// purge everything indexed under it. inotify reports a
+					// directory rename/move as one event on the directory —
+					// its children get no events of their own. (After rm -r
+					// the children's Remove events have usually already done
+					// this, making the purge a no-op.)
 					if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
 						if _, isDir := watchedDirs.Load(event.Name); isDir {
 							removeWatchRecursive(watcher, event.Name)
+							evictFolder(imgPath)
 							return
 						}
 					}
@@ -271,7 +297,6 @@ func watchPhotosDir() {
 						cancelProcessing(imgPath)
 						os.Remove(thumbSmallCachePath(imgPath))
 						os.Remove(thumbMediumCachePath(imgPath))
-						fileMu.Delete(imgPath)
 						deleteFile(imgPath)
 						log.Printf("watcher: removed %s", imgPath)
 					}
@@ -295,9 +320,11 @@ func reconcile() {
 	syncFilesToDB(func(imgPath string) {
 		os.Remove(thumbSmallCachePath(imgPath))
 		os.Remove(thumbMediumCachePath(imgPath))
-		fileMu.Delete(imgPath)
 		log.Printf("reconcile: evicted stale %s", imgPath)
 	})
+
+	sweepTempFiles(photosDir)
+	sweepTempFiles(cacheDir)
 
 	log.Println("reconcile: complete")
 }

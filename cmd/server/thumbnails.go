@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"hash/fnv"
+	"fmt"
 	"image"
 	"image/jpeg"
 	"io"
@@ -13,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,7 +28,200 @@ import (
 
 const thumbnailSize = 400
 
-var fileMu sync.Map
+// fileLocks serializes work on the same file (crop, upload, thumbnail
+// generation, delete, move/copy). Paths hash onto a fixed set of stripes, so
+// memory stays bounded and a lock can never be dropped while held — unlike a
+// per-path map, where deleting an entry another goroutine still holds lets
+// the next caller create a second mutex for the same path. Unrelated paths
+// occasionally share a stripe; that only costs a brief wait.
+var fileLocks [256]sync.Mutex
+
+func fileStripe(imgPath string) int {
+	h := fnv.New32a()
+	h.Write([]byte(imgPath)) //nolint:errcheck
+	return int(h.Sum32() % uint32(len(fileLocks)))
+}
+
+// lockFile acquires the lock for imgPath and returns it locked. Never call it
+// while holding another file lock — use lockFiles for multiple paths.
+func lockFile(imgPath string) *sync.Mutex {
+	mu := &fileLocks[fileStripe(imgPath)]
+	mu.Lock()
+	return mu
+}
+
+// lockFiles locks every path's stripe in ascending stripe order, taking each
+// stripe once, so callers locking several paths can neither deadlock against
+// each other nor self-deadlock when two paths share a stripe. It returns the
+// unlock function.
+func lockFiles(paths ...string) (unlock func()) {
+	stripes := make([]int, 0, len(paths))
+	for _, p := range paths {
+		stripes = append(stripes, fileStripe(p))
+	}
+	sort.Ints(stripes)
+	held := stripes[:0]
+	for i, s := range stripes {
+		if i > 0 && s == stripes[i-1] {
+			continue
+		}
+		fileLocks[s].Lock()
+		held = append(held, s)
+	}
+	return func() {
+		for i := len(held) - 1; i >= 0; i-- {
+			fileLocks[held[i]].Unlock()
+		}
+	}
+}
+
+// maxImagePixels caps the pixel count of any image we fully decode. A tiny
+// file can declare enormous dimensions (a decompression bomb); decoding costs
+// roughly 4–6 bytes per pixel, so the default 100 MP is ~500 MB. Set from the
+// -max-megapixels flag.
+var maxImagePixels int64 = 100_000_000
+
+var errImageTooLarge = errors.New("image exceeds pixel limit")
+
+func checkPixelLimit(w, h int) error {
+	if int64(w)*int64(h) > maxImagePixels {
+		return fmt.Errorf("%w: %dx%d", errImageTooLarge, w, h)
+	}
+	return nil
+}
+
+// checkSourcePixels reads only the image header of srcPath and rejects it if
+// it exceeds the pixel limit. Unreadable headers pass: the full decode that
+// follows will fail on its own (and the ffmpeg fallback checks its output).
+func checkSourcePixels(srcPath string) error {
+	f, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	cfg, _, err := image.DecodeConfig(f)
+	if err != nil {
+		return nil
+	}
+	return checkPixelLimit(cfg.Width, cfg.Height)
+}
+
+// maxConcurrentDecodes bounds full image decodes process-wide — warmup,
+// on-demand thumbnails, uploads and crops all share decodeSem — so a burst of
+// requests can't exhaust memory. Warmup uses at most 2 of these slots, which
+// keeps at least one free for interactive requests.
+const maxConcurrentDecodes = 3
+
+var decodeSem = make(chan struct{}, maxConcurrentDecodes)
+
+// acquireDecode waits for a decode slot, giving up if ctx is cancelled (e.g.
+// the client scrolled past the thumbnail and dropped the request). Lock order
+// is always per-file mutex first, then decode slot.
+func acquireDecode(ctx context.Context) error {
+	select {
+	case decodeSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func releaseDecode() { <-decodeSem }
+
+// openSourceImage decodes the photo at imgPath (auto-oriented), refusing
+// images over the pixel limit; videos yield one extracted frame. When the
+// stdlib decoder rejects a file, ffmpeg is tried; if repair is set the
+// ffmpeg-decoded pixels are written back over the original (JPEGs only — see
+// repairOriginalJPEG). Callers must hold a decode slot.
+func openSourceImage(imgPath string, repair bool, logPrefix string) (image.Image, error) {
+	srcPath := filepath.Join(photosDir, filepath.FromSlash(imgPath))
+	if isVideo(imgPath) {
+		return extractVideoFrame(srcPath)
+	}
+	if err := checkSourcePixels(srcPath); err != nil {
+		return nil, err
+	}
+	img, err := imaging.Open(srcPath, imaging.AutoOrientation(true))
+	if err == nil {
+		return img, nil
+	}
+	fb, ferr := decodeJPEGFallback(srcPath)
+	if ferr != nil {
+		if errors.Is(ferr, errImageTooLarge) {
+			return nil, ferr
+		}
+		return nil, err
+	}
+	log.Printf("%s: stdlib decode failed for %s (%v); used ffmpeg fallback", logPrefix, imgPath, err)
+	if repair {
+		switch rerr := repairOriginalJPEG(srcPath, fb); {
+		case rerr == nil:
+			log.Printf("%s: repaired %s in place", logPrefix, imgPath)
+		case errors.Is(rerr, errNotJPEG):
+		case errors.Is(rerr, errReadOnlyPhotos):
+			log.Printf("%s: repair %s skipped: photos dir not writable", logPrefix, imgPath)
+		default:
+			log.Printf("%s: repair %s failed: %v", logPrefix, imgPath, rerr)
+		}
+	}
+	return fb, nil
+}
+
+// writeThumb JPEG-encodes img and atomically writes it to the cache path cp,
+// returning the encoded bytes.
+func writeThumb(cp string, img image.Image, quality int) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality}); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(cp), 0o755); err != nil {
+		return nil, err
+	}
+	data := buf.Bytes()
+	return data, writeFileAtomic(cp, data, 0o644, false)
+}
+
+// mediumImage downsizes img to mediumWidth when wider, else returns it as is.
+func mediumImage(img image.Image) image.Image {
+	if img.Bounds().Dx() > mediumWidth {
+		return imaging.Resize(img, mediumWidth, 0, imaging.Lanczos)
+	}
+	return img
+}
+
+func smallImage(img image.Image) image.Image {
+	return imaging.Fit(img, thumbnailSize, thumbnailSize, imaging.Lanczos)
+}
+
+// writeThumbs caches the requested thumbnail sizes for imgPath from one
+// decoded image and returns the encoded bytes of each size written. When both
+// are wanted the small thumb is downscaled from the medium one rather than the
+// full-resolution source, which is several times cheaper. A non-nil error
+// reports the first failure; data for sizes that encoded is still returned.
+func writeThumbs(imgPath string, img image.Image, small, medium bool) (smallData, mediumData []byte, err error) {
+	src := img
+	if medium {
+		med := mediumImage(img)
+		mediumData, err = writeThumb(thumbMediumCachePath(imgPath), med, 90)
+		src = med
+	}
+	if small {
+		var serr error
+		smallData, serr = writeThumb(thumbSmallCachePath(imgPath), smallImage(src), 85)
+		if err == nil {
+			err = serr
+		}
+	}
+	return smallData, mediumData, err
+}
+
+// cacheFileReady reports whether a non-empty cached thumbnail exists at cp.
+// Zero-length files (e.g. left by a power loss before data hit the disk) are
+// treated as missing so they get regenerated.
+func cacheFileReady(cp string) bool {
+	fi, err := os.Stat(cp)
+	return err == nil && fi.Size() > 0
+}
 
 // thumbHash returns a 16-char hex string that changes whenever the source
 // file's OS mtime changes, ensuring browsers fetch a fresh thumbnail after
@@ -77,7 +274,7 @@ func parseThumbPath(prefix, fullPath string) (hash, imgPath string, ok bool) {
 	}
 	hash = rest[:slash]
 	imgPath = rest[slash+1:]
-	if hash == "" || !isValidPath(imgPath) {
+	if hash == "" || !isValidPath(imgPath) || !isSupportedMedia(imgPath) {
 		return
 	}
 	ok = true
@@ -86,14 +283,10 @@ func parseThumbPath(prefix, fullPath string) (hash, imgPath string, ok bool) {
 
 // serveCachedThumb is the shared implementation for small and medium thumbnail
 // handlers. All sizes and crop share the same per-filename mutex so a crop
-// cannot race with a concurrent thumbnail write for the same file.
-func serveCachedThumb(
-	w http.ResponseWriter, r *http.Request,
-	prefix string,
-	cachePath func(string) string,
-	transform func(image.Image) image.Image,
-	quality int,
-) {
+// cannot race with a concurrent thumbnail write for the same file. On a cache
+// miss it also generates the other size if missing, so one source decode
+// serves both the grid and the lightbox.
+func serveCachedThumb(w http.ResponseWriter, r *http.Request, prefix string, medium bool) {
 	urlHash, imgPath, ok := parseThumbPath(prefix, r.URL.Path)
 	if !ok {
 		http.Error(w, "invalid", http.StatusBadRequest)
@@ -103,10 +296,13 @@ func serveCachedThumb(
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	cp := cachePath(imgPath)
+	cp, otherCP := thumbSmallCachePath(imgPath), thumbMediumCachePath(imgPath)
+	if medium {
+		cp, otherCP = otherCP, cp
+	}
 	cc := cacheControlForHashedURL(imgPath, urlHash)
 
-	if _, err := os.Stat(cp); err == nil {
+	if cacheFileReady(cp) {
 		w.Header().Set("Content-Type", "image/jpeg")
 		w.Header().Set("Cache-Control", cc)
 		http.ServeFile(w, r, cp)
@@ -119,62 +315,44 @@ func serveCachedThumb(
 		return
 	}
 
-	rawMu, _ := fileMu.LoadOrStore(imgPath, &sync.Mutex{})
-	mu := rawMu.(*sync.Mutex)
-	mu.Lock()
+	mu := lockFile(imgPath)
 	defer mu.Unlock()
 
-	if _, err := os.Stat(cp); err == nil {
+	if cacheFileReady(cp) {
 		w.Header().Set("Content-Type", "image/jpeg")
 		w.Header().Set("Cache-Control", cc)
 		http.ServeFile(w, r, cp)
 		return
 	}
 
-	var img image.Image
-	var err error
-	if isVideo(imgPath) {
-		img, err = extractVideoFrame(srcPath)
-	} else {
-		img, err = imaging.Open(srcPath, imaging.AutoOrientation(true))
-		if err != nil {
-			if fb, ferr := decodeJPEGFallback(srcPath); ferr == nil {
-				log.Printf("thumb: stdlib decode failed for %s (%v); used ffmpeg fallback", imgPath, err)
-				img, err = fb, nil
-				switch rerr := repairOriginalJPEG(srcPath, img); {
-				case rerr == nil:
-					log.Printf("thumb: repaired %s in place", imgPath)
-				case errors.Is(rerr, errReadOnlyPhotos):
-					log.Printf("thumb: repair %s skipped: photos dir not writable", imgPath)
-				default:
-					log.Printf("thumb: repair %s failed: %v", imgPath, rerr)
-				}
-			}
-		}
+	if err := acquireDecode(r.Context()); err != nil {
+		return // client went away while queued
 	}
+	defer releaseDecode()
+
+	img, err := openSourceImage(imgPath, true, "thumb")
 	if err != nil {
 		log.Printf("thumb: decode %s: %v", imgPath, err)
+		if errors.Is(err, errImageTooLarge) {
+			http.Error(w, "image too large", http.StatusUnprocessableEntity)
+			return
+		}
 		http.Error(w, "failed to decode image", http.StatusInternalServerError)
 		return
 	}
 	b := img.Bounds()
-	thumb := transform(img)
-
-	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, thumb, &jpeg.Options{Quality: quality}); err != nil {
-		log.Printf("thumb: encode %s: %v", imgPath, err)
+	needOther := !cacheFileReady(otherCP)
+	smallData, mediumData, err := writeThumbs(imgPath, img, !medium || needOther, medium || needOther)
+	data := smallData
+	if medium {
+		data = mediumData
+	}
+	if err != nil {
+		log.Printf("thumb: %s: %v", imgPath, err)
+	}
+	if data == nil { // a failed cache write alone still returns data to serve
 		http.Error(w, "failed to encode thumbnail", http.StatusInternalServerError)
 		return
-	}
-	data := buf.Bytes()
-	os.MkdirAll(filepath.Dir(cp), 0o755) //nolint:errcheck
-	if f, err := os.Create(cp); err == nil {
-		if _, werr := f.Write(data); werr != nil {
-			f.Close()
-			os.Remove(cp)
-		} else {
-			f.Close()
-		}
 	}
 	indexFileRecord(imgPath, b.Dx(), b.Dy())
 
@@ -184,13 +362,7 @@ func serveCachedThumb(
 }
 
 func handleThumb(w http.ResponseWriter, r *http.Request) {
-	serveCachedThumb(w, r,
-		"/api/thumb/", thumbSmallCachePath,
-		func(img image.Image) image.Image {
-			return imaging.Fit(img, thumbnailSize, thumbnailSize, imaging.Lanczos)
-		},
-		85,
-	)
+	serveCachedThumb(w, r, "/api/thumb/", false)
 }
 
 func handleThumbMedium(w http.ResponseWriter, r *http.Request) {
@@ -203,16 +375,7 @@ func handleThumbMedium(w http.ResponseWriter, r *http.Request) {
 			safeGo("trackView-thumb-medium", func() { trackView(imgPath, u) })
 		}
 	}
-	serveCachedThumb(w, r,
-		"/api/thumb-medium/", thumbMediumCachePath,
-		func(img image.Image) image.Image {
-			if img.Bounds().Dx() > mediumWidth {
-				return imaging.Resize(img, mediumWidth, 0, imaging.Lanczos)
-			}
-			return img
-		},
-		90,
-	)
+	serveCachedThumb(w, r, "/api/thumb-medium/", true)
 }
 
 // warmupRec holds the database fields needed by warmupThumbnails to decide
@@ -234,7 +397,7 @@ func warmupThumbnails() {
 
 	// Pre-load all stored records so we avoid per-file DB queries in the walk.
 	existing := make(map[string]warmupRec)
-	if rows, err := db.Query(`SELECT path, file_mtime, width FROM files`); err == nil {
+	if rows, err := readDB().Query(`SELECT path, file_mtime, width FROM files`); err == nil {
 		for rows.Next() {
 			var p string
 			var ns int64
@@ -255,14 +418,8 @@ func warmupThumbnails() {
 		mtimeChanged := !rec.fileMtime.Equal(fi.ModTime())
 		hasDims := rec.width > 0
 
-		needsSmall := func() bool {
-			_, err := os.Stat(thumbSmallCachePath(imgPath))
-			return err != nil
-		}()
-		needsMedium := func() bool {
-			_, err := os.Stat(thumbMediumCachePath(imgPath))
-			return err != nil
-		}()
+		needsSmall := !cacheFileReady(thumbSmallCachePath(imgPath))
+		needsMedium := !cacheFileReady(thumbMediumCachePath(imgPath))
 
 		if hasDims && !needsSmall && !needsMedium && !mtimeChanged {
 			return
@@ -307,28 +464,14 @@ func warmupThumbnails() {
 			defer wg.Done()
 			defer func() { <-semFull }()
 
-			srcPath := filepath.Join(photosDir, filepath.FromSlash(p))
-			var img image.Image
-			var err error
-			if isVideo(p) {
-				img, err = extractVideoFrame(srcPath)
-			} else {
-				img, err = imaging.Open(srcPath, imaging.AutoOrientation(true))
-				if err != nil {
-					if fb, ferr := decodeJPEGFallback(srcPath); ferr == nil {
-						log.Printf("warmup: stdlib decode failed for %s (%v); used ffmpeg fallback", p, err)
-						img, err = fb, nil
-						switch rerr := repairOriginalJPEG(srcPath, img); {
-						case rerr == nil:
-							log.Printf("warmup: repaired %s in place", p)
-						case errors.Is(rerr, errReadOnlyPhotos):
-							log.Printf("warmup: repair %s skipped: photos dir not writable", p)
-						default:
-							log.Printf("warmup: repair %s failed: %v", p, rerr)
-						}
-					}
-				}
-			}
+			// Same lock as crop/upload/thumbnail requests, so warmup can't
+			// write a thumbnail of pre-crop pixels after a crop evicted it.
+			mu := lockFile(p)
+			defer mu.Unlock()
+			acquireDecode(context.Background()) //nolint:errcheck
+			defer releaseDecode()
+
+			img, err := openSourceImage(p, true, "warmup")
 			if err != nil {
 				log.Printf("warmup: open %s: %v", p, err)
 				indexFileRecord(p, 0, 0)
@@ -336,31 +479,8 @@ func warmupThumbnails() {
 			}
 			b := img.Bounds()
 			indexFileRecord(p, b.Dx(), b.Dy())
-			if genSmall {
-				thumb := imaging.Fit(img, thumbnailSize, thumbnailSize, imaging.Lanczos)
-				cp := thumbSmallCachePath(p)
-				os.MkdirAll(filepath.Dir(cp), 0o755) //nolint:errcheck
-				if f, err := os.Create(cp); err == nil {
-					jpeg.Encode(f, thumb, &jpeg.Options{Quality: 85}) //nolint:errcheck
-					f.Close()
-				}
-			}
-			if genMedium {
-				var thumb image.Image
-				if b.Dx() > mediumWidth {
-					thumb = imaging.Resize(img, mediumWidth, 0, imaging.Lanczos)
-				} else {
-					thumb = img
-				}
-				img = nil
-				cp := thumbMediumCachePath(p)
-				os.MkdirAll(filepath.Dir(cp), 0o755) //nolint:errcheck
-				if f, err := os.Create(cp); err == nil {
-					jpeg.Encode(f, thumb, &jpeg.Options{Quality: 90}) //nolint:errcheck
-					f.Close()
-				}
-			} else {
-				img = nil
+			if _, _, err := writeThumbs(p, img, genSmall, genMedium); err != nil {
+				log.Printf("warmup: thumbs %s: %v", p, err)
 			}
 		}(imgPath, needsSmall || mtimeChanged, needsMedium || mtimeChanged)
 	})

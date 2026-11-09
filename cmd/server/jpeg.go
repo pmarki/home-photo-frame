@@ -57,10 +57,14 @@ func resetExifOrientation(app1 []byte) []byte {
 	if bo.Uint16(tiff[2:4]) != 42 {
 		return app1
 	}
-	ifd0 := int(bo.Uint32(tiff[4:8]))
-	if ifd0+2 > len(tiff) {
+	// The offset is untrusted file data. Bounds-check it as uint64 before
+	// converting: on 32-bit platforms (e.g. ARMv7 photo frames) int(uint32)
+	// of a large offset wraps negative and would slip past an int comparison.
+	off0 := uint64(bo.Uint32(tiff[4:8]))
+	if off0+2 > uint64(len(tiff)) {
 		return app1
 	}
+	ifd0 := int(off0)
 	n := int(bo.Uint16(tiff[ifd0:]))
 
 	out := make([]byte, len(app1))

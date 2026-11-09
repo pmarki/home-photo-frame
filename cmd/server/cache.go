@@ -6,7 +6,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strings"
 	"time"
 )
 
@@ -44,7 +43,7 @@ func walkPhotosDir(fn func(imgPath string, fi os.FileInfo)) {
 		if d.IsDir() {
 			return nil
 		}
-		if !supportedExts[strings.ToLower(filepath.Ext(d.Name()))] {
+		if !isSupportedMedia(d.Name()) {
 			return nil
 		}
 		fi, err := d.Info()
@@ -70,7 +69,7 @@ func syncFilesToDB(onEvict func(imgPath string)) {
 
 	// Pre-load existing records: path → stored mtime, for fast comparison.
 	existing := make(map[string]time.Time)
-	if rows, err := db.Query(`SELECT path, file_mtime FROM files`); err == nil {
+	if rows, err := readDB().Query(`SELECT path, file_mtime FROM files`); err == nil {
 		for rows.Next() {
 			var p string
 			var ns int64

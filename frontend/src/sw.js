@@ -72,6 +72,17 @@ async function handleShareTarget(request) {
   return Response.redirect('/?share-pending=1', 303)
 }
 
+// Earlier versions cached whole videos in the originals cache; drop them on
+// activation so the space comes back without waiting for expiry.
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.open('originals-v1').then(async (cache) => {
+      const keys = await cache.keys()
+      await Promise.all(keys.filter((req) => isVideoURL(new URL(req.url))).map((req) => cache.delete(req)))
+    })
+  )
+})
+
 // ── Runtime caching ───────────────────────────────────────────────────
 
 // Thumbnails: cache-first, 30-day TTL, max 2000 entries
@@ -125,8 +136,22 @@ registerRoute(
 // file's mtime changes), so the cached response is always valid — no need
 // for SWR's background revalidation. Cache-first also means previously-viewed
 // images aren't blocked behind a stale network connection after tab wake.
+//
+// Videos are excluded: whole videos would blow through the storage quota,
+// and <video> streams them with Range requests, which a cache-first route
+// can't answer (the 206 responses aren't cacheable). Unmatched requests fall
+// through to the network, so the browser and server handle ranges natively.
+const VIDEO_EXT = /\.(mp4|webm|mov|m4v)$/i
+
+function isVideoURL(url) {
+  return VIDEO_EXT.test(url.pathname)
+}
+
 registerRoute(
-  ({ url }) => url.pathname.startsWith('/api/original/'),
+  ({ url, request }) =>
+    url.pathname.startsWith('/api/original/') &&
+    !isVideoURL(url) &&
+    !request.headers.has('range'),
   new CacheFirst({
     cacheName: 'originals-v1',
     plugins: [

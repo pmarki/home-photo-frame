@@ -90,6 +90,41 @@ func openDB(dbDir string) (*sql.DB, error) {
 	return d, nil
 }
 
+// dbRead is a pool of read-only connections so list/browse queries don't
+// queue behind writes (or each other) on the single writer connection — WAL
+// lets readers run concurrently with the writer. nil in tests, where the
+// in-memory database can't be shared across connections; use readDB().
+var dbRead *sql.DB
+
+const readPoolSize = 4
+
+// openReadDB opens the read pool for the database in dbDir. Call after
+// openDB, which creates the schema and switches the file to WAL mode.
+// Pragmas are set through the DSN so they apply to every pooled connection.
+func openReadDB(dbDir string) (*sql.DB, error) {
+	dsn := filepath.Join(dbDir, "files.db") + "?_pragma=busy_timeout(5000)&_pragma=query_only(1)"
+	d, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("openReadDB: %w", err)
+	}
+	d.SetMaxOpenConns(readPoolSize)
+	d.SetMaxIdleConns(readPoolSize)
+	if err := d.Ping(); err != nil {
+		d.Close()
+		return nil, fmt.Errorf("openReadDB: %w", err)
+	}
+	return d, nil
+}
+
+// readDB returns the pool to use for read-only queries: the read pool when
+// open, otherwise the writer.
+func readDB() *sql.DB {
+	if dbRead != nil {
+		return dbRead
+	}
+	return db
+}
+
 // upsertFile inserts or updates a file record. When w==0 the existing width/height
 // in the database are preserved (used when dimensions are not yet known).
 func upsertFile(imgPath string, fi os.FileInfo, dateTaken time.Time, w, h int) error {
@@ -122,17 +157,100 @@ func upsertFile(imgPath string, fi os.FileInfo, dateTaken time.Time, w, h int) e
 
 // deleteFile removes a file record from the database. Also clears any view
 // history and favorite rows for the path — those are keyed by path and would
-// otherwise linger as phantom rows.
+// otherwise linger as phantom rows. All three deletes commit atomically.
 func deleteFile(imgPath string) {
-	if _, err := db.Exec(`DELETE FROM files WHERE path = ?`, imgPath); err != nil {
+	if err := deleteFileTx(imgPath); err != nil {
 		log.Printf("db: delete %s: %v", imgPath, err)
 	}
-	if _, err := db.Exec(`DELETE FROM file_views WHERE file_path = ?`, imgPath); err != nil {
-		log.Printf("db: delete views for %s: %v", imgPath, err)
+}
+
+func deleteFileTx(imgPath string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
 	}
-	if _, err := db.Exec(`DELETE FROM file_favorites WHERE file_path = ?`, imgPath); err != nil {
-		log.Printf("db: delete favorites for %s: %v", imgPath, err)
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.Exec(`DELETE FROM files WHERE path = ?`, imgPath); err != nil {
+		return err
 	}
+	for _, t := range userDataTables {
+		if _, err := tx.Exec(`DELETE FROM `+t+` WHERE file_path = ?`, imgPath); err != nil {
+			return fmt.Errorf("%s: %w", t, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// subtreeCond is a WHERE fragment matching rows whose folder is f or any
+// folder beneath it. It uses the half-open range [f+"/", f+"0") — '0' is the
+// byte after '/' — instead of LIKE, so it is index-backed and folder names
+// containing % or _ match literally. Bind with subtreeArgs(f).
+const subtreeCond = "(folder = ? OR (folder >= ? AND folder < ?))"
+
+func subtreeArgs(f string) []any { return []any{f, f + "/", f + "0"} }
+
+// likeEscaper escapes LIKE metacharacters for use with ESCAPE '\'.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+// userDataTables are the per-user tables keyed by file_path.
+var userDataTables = []string{"file_views", "file_favorites"}
+
+// moveUserData re-keys view history and favorites from one path to another,
+// atomically. Rows already present at the destination (orphans left by an
+// earlier file at the same path) are replaced.
+func moveUserData(from, to string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	for _, t := range userDataTables {
+		if _, err := tx.Exec(`UPDATE OR REPLACE `+t+` SET file_path = ? WHERE file_path = ?`, to, from); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// deleteFolderRecords removes every file record under folder (at any depth)
+// together with its view and favorite rows, and returns the removed paths.
+// Matching uses the half-open range [folder+"/", folder+"0") — '0' is the
+// byte after '/' — so it is index-backed and immune to LIKE wildcards.
+func deleteFolderRecords(folder string) ([]string, error) {
+	lo, hi := folder+"/", folder+"0"
+	rows, err := db.Query(`SELECT path FROM files WHERE path >= ? AND path < ?`, lo, hi)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		paths = append(paths, p)
+	}
+	// Close before opening the transaction: the pool has a single connection.
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.Exec(`DELETE FROM files WHERE path >= ? AND path < ?`, lo, hi); err != nil {
+		return nil, err
+	}
+	for _, t := range userDataTables {
+		if _, err := tx.Exec(`DELETE FROM `+t+` WHERE file_path >= ? AND file_path < ?`, lo, hi); err != nil {
+			return nil, err
+		}
+	}
+	return paths, tx.Commit()
 }
 
 // setFavorite records or removes a favorite for (imgPath, userID). Insert is
@@ -180,7 +298,7 @@ func lookupFile(imgPath, userID string) (ImageInfo, error) {
 		w, h                       int
 		favorited                  bool
 	)
-	err := db.QueryRow(
+	err := readDB().QueryRow(
 		`SELECT files.filename, files.file_mtime, files.date_taken, files.size,
 		        files.width, files.height,
 		        ff.favorited_at IS NOT NULL
@@ -250,16 +368,16 @@ func queryFiles(params queryParams) ([]ImageInfo, int, error) {
 	}
 
 	if params.folder != "" {
-		conds = append(conds, "(folder = ? OR folder LIKE ?||'/%')")
-		args = append(args, params.folder, params.folder)
+		conds = append(conds, subtreeCond)
+		args = append(args, subtreeArgs(params.folder)...)
 	}
 	if params.ftype != "" {
 		conds = append(conds, "file_type = ?")
 		args = append(args, params.ftype)
 	}
 	if params.search != "" {
-		parts := []string{"LOWER(filename) LIKE LOWER(?)"}
-		args = append(args, "%"+params.search+"%")
+		parts := []string{`LOWER(filename) LIKE LOWER(?) ESCAPE '\'`}
+		args = append(args, "%"+likeEscaper.Replace(params.search)+"%")
 		if dq := parseDateQuery(params.search); dq != nil {
 			for _, r := range dq.ranges {
 				parts = append(parts, "(date_taken >= ? AND date_taken < ?)")
@@ -291,15 +409,15 @@ func queryFiles(params queryParams) ([]ImageInfo, int, error) {
 		} else {
 			parts := make([]string, 0, len(params.ownerFolders))
 			for _, f := range params.ownerFolders {
-				parts = append(parts, "(folder = ? OR folder LIKE ?||'/%')")
-				args = append(args, f, f)
+				parts = append(parts, subtreeCond)
+				args = append(args, subtreeArgs(f)...)
 			}
 			conds = append(conds, "("+strings.Join(parts, " OR ")+")")
 		}
 	}
 	for _, d := range params.deniedTopFolders {
-		conds = append(conds, "folder <> ? AND folder NOT LIKE ?||'/%'")
-		args = append(args, d, d)
+		conds = append(conds, "NOT "+subtreeCond)
+		args = append(args, subtreeArgs(d)...)
 	}
 
 	where := ""
@@ -331,7 +449,7 @@ func queryFiles(params queryParams) ([]ImageInfo, int, error) {
 	}
 
 	var total int
-	if err := db.QueryRow(
+	if err := readDB().QueryRow(
 		fmt.Sprintf("SELECT COUNT(*) FROM files %s %s", joinClause, where), args...,
 	).Scan(&total); err != nil {
 		return nil, 0, err
@@ -346,7 +464,7 @@ func queryFiles(params queryParams) ([]ImageInfo, int, error) {
 		"SELECT files.path, filename, file_mtime, date_taken, size, width, height, ff.favorited_at IS NOT NULL FROM files %s %s %s %s",
 		joinClause, where, orderClause, limitClause,
 	)
-	rows, err := db.Query(q, args...)
+	rows, err := readDB().Query(q, args...)
 	if err != nil {
 		return nil, 0, err
 	}

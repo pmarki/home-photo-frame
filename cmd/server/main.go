@@ -60,12 +60,18 @@ func main() {
 		mediumWidthDefault = v
 	}
 	flag.IntVar(&mediumWidth, "medium-width", mediumWidthDefault, "max pixel width for medium thumbnails (env: MEDIUM_WIDTH)")
+	maxMPDefault := 100
+	if v, err := strconv.Atoi(envOr("MAX_MEGAPIXELS", "")); err == nil && v > 0 {
+		maxMPDefault = v
+	}
+	maxMP := flag.Int("max-megapixels", maxMPDefault, "refuse to decode images larger than this many megapixels; guards memory against decompression bombs (env: MAX_MEGAPIXELS)")
 	videoDefault := strings.EqualFold(envOr("VIDEO", ""), "1") || strings.EqualFold(envOr("VIDEO", ""), "true")
 	flag.BoolVar(&videoEnabled, "video", videoDefault, "enable mp4 video upload and thumbnails; requires ffmpeg (env: VIDEO=1)")
 	flag.StringVar(&bgColor, "bg-color", envOr("BG_COLOR", "#0a0a0f"), "primary background hex colour (env: BG_COLOR)")
 	flag.StringVar(&iconsDir, "icons-dir", envOr("ICONS_DIR", ""), "directory with custom icon files; falls back to embedded (env: ICONS_DIR)")
 	flag.StringVar(&configPath, "config", envOr("CONFIG_FILE", "./config.yaml"), "path to YAML config file with users and folder assignments (env: CONFIG_FILE)")
 	flag.Parse()
+	maxImagePixels = int64(*maxMP) * 1_000_000
 
 	if _, err := loadConfig(configPath); err != nil {
 		log.Fatalf("config: %v", err)
@@ -145,11 +151,19 @@ func main() {
 	if err != nil {
 		log.Fatalf("database: %v", err)
 	}
+	dbRead, err = openReadDB(dbDir)
+	if err != nil {
+		log.Fatalf("database: %v", err)
+	}
 
 	syncFilesToDB(nil)
 
 	safeGo("warmup", warmupThumbnails)
 	go sweepOrphanedUploads()
+	safeGo("sweep-temp", func() {
+		sweepTempFiles(photosDir)
+		sweepTempFiles(cacheDir)
+	})
 	watchPhotosDir()
 	scheduleNightlyReconcile()
 
@@ -196,6 +210,9 @@ func main() {
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
 			log.Printf("shutdown: server: %v", err)
+		}
+		if err := dbRead.Close(); err != nil {
+			log.Printf("shutdown: db read pool: %v", err)
 		}
 		if err := db.Close(); err != nil {
 			log.Printf("shutdown: db: %v", err)

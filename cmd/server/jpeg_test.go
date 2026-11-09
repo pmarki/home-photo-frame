@@ -208,3 +208,23 @@ func TestJPEGRoundTrip(t *testing.T) {
 		t.Errorf("re-extracted APP1 differs from reset APP1")
 	}
 }
+
+// TestResetExifOrientationHostileOffsets feeds IFD0 offsets that overflow a
+// 32-bit int, plus an inflated entry count; none may panic. Run with
+// GOARCH=386 to exercise the 32-bit wrap-around path.
+func TestResetExifOrientationHostileOffsets(t *testing.T) {
+	for _, off := range []uint32{0x7FFFFFFF, 0x80000000, 0xFFFFFFF0, 0xFFFFFFFF} {
+		app1 := buildAPP1(buildTIFFLE(6))
+		binary.LittleEndian.PutUint32(app1[10+4:], off)
+		got := resetExifOrientation(app1)
+		if !bytes.Equal(got, app1) {
+			t.Errorf("offset %#x: input was modified", off)
+		}
+	}
+
+	app1 := buildAPP1(buildTIFFLE(6))
+	tiff := app1[10:]
+	ifd0 := binary.LittleEndian.Uint32(tiff[4:8])
+	binary.LittleEndian.PutUint16(tiff[ifd0:], 0xFFFF) // entry count far past the end
+	resetExifOrientation(app1)                          // must not panic
+}
