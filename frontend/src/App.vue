@@ -66,6 +66,7 @@
         :total="total"
         :loading="loading"
         :viewMode="viewMode"
+        :chronological="!filters.viewed"
         @open="openModal"
         @request-menu="onRequestMenu"
         @toggle-favorite="onToggleFavorite"

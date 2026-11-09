@@ -44,6 +44,8 @@ const props = defineProps({
   getMonthLabel: { type: Function, required: true },
 })
 
+const emit = defineEmits(['dragging'])
+
 const barRef = ref(null)
 const isDragging = ref(false)
 const tooltipText = ref(null)
@@ -92,6 +94,7 @@ function updateTooltip(e) {
 
 function onPointerDown(e) {
   isDragging.value = true
+  emit('dragging', true)
   barRef.value.setPointerCapture(e.pointerId)
   scrollToY(e)
   updateTooltip(e)
@@ -105,6 +108,7 @@ function onPointerMove(e) {
 
 function onPointerUp() {
   isDragging.value = false
+  emit('dragging', false)
   tooltipText.value = null
 }
 </script>

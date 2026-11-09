@@ -126,15 +126,19 @@
     :handlePos="handlePos"
     :maxScrollY="maxScrollY"
     :getMonthLabel="getMonthLabel"
+    @dragging="scrollbarDragging = $event"
   />
+  <ScrollDateTooltip :label="scrollDateLabel" :visible="showScrollDate" />
 </template>
 
 <script setup>
 import { ref, toRef, reactive, computed, watch } from 'vue'
 import GalleryPlaceholder from './GalleryPlaceholder.vue'
 import YearScrollbar from './YearScrollbar.vue'
+import ScrollDateTooltip from './ScrollDateTooltip.vue'
 import { useVirtualScroll } from '../composables/useVirtualScroll.js'
 import { useYearScrollbar } from '../composables/useYearScrollbar.js'
+import { useFastScroll } from '../composables/useFastScroll.js'
 import { useImageSelection } from '../composables/useImageSelection.js'
 
 const props = defineProps({
@@ -142,6 +146,9 @@ const props = defineProps({
   total:    { type: Number,  default: 0 },
   loading:  { type: Boolean, default: false },
   viewMode: { type: String,  default: 'gallery' },
+  // False when the list isn't in date order (e.g. the "viewed" filters), so
+  // date indicators would jump around meaninglessly.
+  chronological: { type: Boolean, default: true },
 })
 
 const emit = defineEmits(['open', 'request-menu', 'toggle-favorite'])
@@ -169,6 +176,22 @@ const { yearItems, currentYear, visible: yearVisible, handlePos, maxScrollY, get
   totalRows,
   viewportHeight,
   dateField: yearDateField,
+})
+
+// Month/year pill under the header while scrolling fast. Suppressed while the
+// year scrollbar is dragged, since it shows its own month tooltip there.
+const { active: fastScrolling } = useFastScroll({ scrollY, viewportHeight })
+const scrollbarDragging = ref(false)
+const showScrollDate = computed(() =>
+  (props.viewMode === 'gallery' || props.viewMode === 'timeline') &&
+  props.chronological &&
+  fastScrolling.value &&
+  !scrollbarDragging.value
+)
+// Updated only while shown, so the text stays put during the fade-out.
+const scrollDateLabel = ref(null)
+watch([showScrollDate, scrollY], () => {
+  if (showScrollDate.value) scrollDateLabel.value = getMonthLabel(scrollY.value)
 })
 
 const loadingSet = reactive(new Set())
