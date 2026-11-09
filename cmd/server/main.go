@@ -183,6 +183,7 @@ func main() {
 	mux.HandleFunc("/api/delete", handleDelete)
 	mux.HandleFunc("/api/move", handleMove)
 	mux.HandleFunc("/api/copy", handleCopy)
+	mux.HandleFunc("/share-target", handleShareTargetFallback)
 	mux.HandleFunc("/manifest.webmanifest", handleManifest)
 	mux.HandleFunc("/icons/", handleIcons)
 	mux.Handle("/", frontendHandler())

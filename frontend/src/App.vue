@@ -113,10 +113,6 @@
         @close="closeAbout"
         @logout="onLogout"
       />
-      <ShareUploader
-        v-if="shareUploaderVisible"
-        @done="onShareDone"
-      />
       <UploadDialog
         v-if="uploadFiles"
         :files="uploadFiles"
@@ -171,7 +167,6 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import GalleryGrid from './components/GalleryGrid.vue'
 import LightboxModal from './components/LightboxModal.vue'
-import ShareUploader from './components/ShareUploader.vue'
 import UploadDialog from './components/UploadDialog.vue'
 import PostUploadCropQueue from './components/PostUploadCropQueue.vue'
 import ViewModeToggle from './components/ViewModeToggle.vue'
@@ -260,7 +255,6 @@ watch(hasActiveFilters, (active) => { if (active) filtersOpen.value = true })
 
 const modalOpen = ref(false)
 const modalIndex = ref(0)
-const shareUploaderVisible = ref(false)
 const uploadFiles = ref(null)
 const cropQueue = ref(null)  // [{filename}] — shown after upload when non-null
 const sideMenuOpen = ref(false)
@@ -322,12 +316,6 @@ function onPopState(e) {
     forceReload()
   } else if (uploadFiles.value !== null) {
     uploadFiles.value = null
-    forceReload()
-  } else if (shareUploaderVisible.value) {
-    shareUploaderVisible.value = false
-    const url = new URL(window.location.href)
-    url.searchParams.delete('share-pending')
-    history.replaceState({ modal: null }, '', url)
     forceReload()
   } else {
     const m = window.location.pathname.match(/^\/folder\/(.+?)\/?$/)
@@ -609,17 +597,26 @@ function onCropped(oldPath, newImage) {
   replaceImage(oldPath, newImage)
 }
 
-function onShareDone(uploadedImages) {
-  shareUploaderVisible.value = false
-  const url = new URL(window.location.href)
-  url.searchParams.delete('share-pending')
-  history.replaceState({ modal: null }, '', url)
-  const croppable = (uploadedImages ?? []).filter(i => !isVideo(i.filename))
-  if (croppable.length > 0) {
-    cropQueue.value = croppable
-    history.pushState({ modal: 'cropqueue' }, '')
-  } else {
-    forceReload()
+async function readSharePending() {
+  const SHARE_CACHE = 'share-pending-v1'
+  try {
+    const cache = await caches.open(SHARE_CACHE)
+    const manifestRes = await cache.match('/share-pending/manifest')
+    if (!manifestRes) return []
+    const fileInfos = await manifestRes.json()
+    await cache.delete('/share-pending/manifest')
+    const files = []
+    for (const info of fileInfos) {
+      const res = await cache.match(info.key)
+      if (!res) continue
+      const blob = await res.blob()
+      files.push(new File([blob], info.name, { type: info.type }))
+      await cache.delete(info.key)
+    }
+    return files
+  } catch (err) {
+    console.error('readSharePending failed', err)
+    return []
   }
 }
 
@@ -692,8 +689,12 @@ onMounted(async () => {
 
   const url = new URL(window.location.href)
   if (url.searchParams.has('share-pending')) {
-    shareUploaderVisible.value = true
-    history.pushState({ modal: 'share-uploader' }, '')
+    url.searchParams.delete('share-pending')
+    history.replaceState({ modal: null }, '', url)
+    readSharePending().then((files) => {
+      if (files.length > 0) onUploadFiles(files)
+      else showToast('Shared files were not received — please share again')
+    })
   }
   window.addEventListener('popstate', onPopState)
   window.addEventListener('keydown', onGlobalKeydown)

@@ -16,6 +16,9 @@ window.fetch = async (input, init = {}) => {
   return res
 }
 
+// Captured before App.vue strips the param on mount.
+const launchedFromShare = new URL(window.location.href).searchParams.has('share-pending')
+
 createApp(App).mount('#app')
 
 if ('serviceWorker' in navigator) {
@@ -28,6 +31,10 @@ if ('serviceWorker' in navigator) {
     let refreshing = false
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       if (refreshing) return
+      // A share launch is a fresh load, so it often coincides with an SW
+      // update. Reloading here would drop the shared files App.vue has already
+      // pulled out of the share cache; the new SW takes effect next navigation.
+      if (launchedFromShare) return
       refreshing = true
       window.location.reload()
     })
