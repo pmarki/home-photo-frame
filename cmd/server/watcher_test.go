@@ -49,3 +49,26 @@ func TestEvictFolderRejectsInvalidPath(t *testing.T) {
 		t.Error("cache root was removed")
 	}
 }
+
+func TestIndexArrivedFileSkipsAlreadyIndexed(t *testing.T) {
+	setupTestEnv(t)
+	seedIndexed(t, "album/1.jpg")
+	thumb := thumbSmallCachePath("album/1.jpg")
+	os.MkdirAll(filepath.Dir(thumb), 0o755) //nolint:errcheck
+	os.WriteFile(thumb, []byte("t"), 0o644) //nolint:errcheck
+
+	fi, _ := os.Stat(filepath.Join(photosDir, "album", "1.jpg"))
+	if indexArrivedFile("album/1.jpg", fi) {
+		t.Error("file with matching DB mtime was re-indexed")
+	}
+	if _, err := os.Stat(thumb); err != nil {
+		t.Error("cached thumbnail was evicted")
+	}
+
+	// A file the DB doesn't know yet is indexed.
+	os.WriteFile(filepath.Join(photosDir, "album", "2.jpg"), makeTestJPEG(4, 4), 0o644) //nolint:errcheck
+	fi2, _ := os.Stat(filepath.Join(photosDir, "album", "2.jpg"))
+	if !indexArrivedFile("album/2.jpg", fi2) {
+		t.Error("new file was not indexed")
+	}
+}

@@ -185,6 +185,19 @@ func evictFolder(folder string) {
 	}
 }
 
+// indexArrivedFile indexes one file found in a directory that just appeared.
+// Files whose database row already records this exact mtime are skipped: an
+// in-app folder rename re-keys the rows (and moves the cached thumbnails)
+// before renaming the directory, and re-processing would evict those
+// thumbnails. Returns whether the file was (re)indexed.
+func indexArrivedFile(imgPath string, fi os.FileInfo) bool {
+	if dbMtimeMatches(imgPath, fi.ModTime()) {
+		return false
+	}
+	updateCachedFile(imgPath, fi, true)
+	return true
+}
+
 // indexNewlyArrivedDir walks a directory that just appeared (e.g. via rename/mv)
 // and indexes all supported files inside it using a 4-worker pool.
 func indexNewlyArrivedDir(dirPath string) {
@@ -213,7 +226,7 @@ func indexNewlyArrivedDir(dirPath string) {
 			go func() {
 				defer wg.Done()
 				defer func() { <-sem }()
-				updateCachedFile(imgPath, fi, true)
+				indexArrivedFile(imgPath, fi)
 			}()
 			return nil
 		})

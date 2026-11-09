@@ -67,6 +67,8 @@ All server code is in a single `package main`. Source files by responsibility:
 
 **Watcher folder moves**: inotify reports a directory rename as a single event, so `evictFolder` purges DB rows, user data and cached thumbs under the old path. In-app moves (`handleMove`) re-key favorites/views via `moveUserData` *before* the rename so the watcher's delete of the old path finds nothing to drop.
 
+**Folder rename** (`POST /api/rename-folder` `{path, name}`, name-only — the parent stays): `renameFolderRecords` re-keys `files` (path + folder) and favorites/views *before* `os.Rename`, then the `cache/s` and `cache/m` subtrees are renamed, so nothing is regenerated. The watcher's later events are harmless: `evictFolder(old)` finds no rows, and `indexArrivedFile` skips files whose DB mtime already matches. Top-level folders assigned in `config.yaml` can't be renamed (409) — the assignment matches by name, so a rename would make a private folder public. Frontend: pencil button in `FolderTree` (`editable` prop, side menu only) → `RenameFolderModal`; `App.vue` keeps a session list of renames and maps stale `/folder/...` history entries forward on popstate.
+
 **Date resolution priority**: EXIF `DateTimeOriginal` → filename pattern `YYYYMMDD_HHMMSS` at basename start → file mtime. Stored in `date_taken` column; skips re-extraction when mtime is unchanged.
 
 **File identity**: the relative path from `photosDir` (forward-slash separated, e.g. `vacation/beach/photo.jpg`) is the stable key used in the database, API paths, and cache filenames.

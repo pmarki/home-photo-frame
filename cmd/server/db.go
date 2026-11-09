@@ -253,6 +253,48 @@ func deleteFolderRecords(folder string) ([]string, error) {
 	return paths, tx.Commit()
 }
 
+// renameFolderRecords re-keys every file record under folder from (at any
+// depth) to live under folder to, together with its view and favorite rows,
+// atomically. Stale rows already in the to range (orphans) are dropped first
+// so the rewritten paths can't collide. Prefix arithmetic uses SQLite's
+// character-based length/substr on both sides, so non-ASCII names are safe.
+func renameFolderRecords(from, to string) error {
+	fromLo, fromHi := from+"/", from+"0"
+	toLo, toHi := to+"/", to+"0"
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.Exec(`DELETE FROM files WHERE path >= ? AND path < ?`, toLo, toHi); err != nil {
+		return err
+	}
+	for _, t := range userDataTables {
+		if _, err := tx.Exec(`DELETE FROM `+t+` WHERE file_path >= ? AND file_path < ?`, toLo, toHi); err != nil {
+			return err
+		}
+	}
+
+	if _, err := tx.Exec(`
+		UPDATE files SET
+			path   = ? || substr(path, length(?) + 1),
+			folder = CASE WHEN folder = ? THEN ? ELSE ? || substr(folder, length(?) + 1) END
+		WHERE path >= ? AND path < ?`,
+		toLo, fromLo, from, to, toLo, fromLo, fromLo, fromHi,
+	); err != nil {
+		return err
+	}
+	for _, t := range userDataTables {
+		if _, err := tx.Exec(`UPDATE `+t+` SET file_path = ? || substr(file_path, length(?) + 1)
+			WHERE file_path >= ? AND file_path < ?`, toLo, fromLo, fromLo, fromHi); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // setFavorite records or removes a favorite for (imgPath, userID). Insert is
 // idempotent — re-favoriting is a no-op. Delete on a missing row is also fine.
 func setFavorite(imgPath, userID string, fav bool) error {

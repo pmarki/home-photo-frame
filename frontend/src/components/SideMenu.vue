@@ -88,7 +88,9 @@
           :nodes="displayTree"
           :current-folder="folder"
           :highlight="activeTerm"
+          editable
           @select="select"
+          @rename="renamePath = $event"
         />
       </nav>
 
@@ -101,12 +103,19 @@
         <span>About</span>
       </button>
     </aside>
+    <RenameFolderModal
+      v-if="renamePath"
+      :path="renamePath"
+      @close="renamePath = null"
+      @renamed="onRenamed"
+    />
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, nextTick, watch } from 'vue'
-import FolderTree from './FolderTree.vue'
+import FolderTree, { renameFolderOverrides } from './FolderTree.vue'
+import RenameFolderModal from './RenameFolderModal.vue'
 import { buildFolderTree, filterFolderTree, foldStr, FOLDER_ORDER } from '../composables/useFolderTree.js'
 import { lockBodyOverflow, unlockBodyOverflow } from '../composables/useBodyOverflowLock.js'
 import { useUser } from '../composables/useUser.js'
@@ -120,7 +129,7 @@ const props = defineProps({
   videoEnabled: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['close', 'upload-files', 'select-folder', 'open-about'])
+const emit = defineEmits(['close', 'upload-files', 'select-folder', 'open-about', 'folder-renamed'])
 
 const visible = ref(false)
 const fileInput = ref(null)
@@ -173,10 +182,21 @@ function onFilesSelected(e) {
 }
 
 function onKeydown(e) {
+  // While the rename modal is open, Escape belongs to it.
+  if (renamePath.value) return
   if (e.key === 'Escape') {
     e.stopPropagation()
     requestClose()
   }
+}
+
+// Path of the folder being renamed; non-null while the rename modal is open.
+const renamePath = ref(null)
+
+function onRenamed({ from, to }) {
+  renameFolderOverrides(from, to)
+  fetchFolders()
+  emit('folder-renamed', { from, to })
 }
 
 let fetchController = null

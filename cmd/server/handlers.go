@@ -642,6 +642,108 @@ func handleCopy(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleRenameFolder renames a folder in place (same parent, new last
+// segment). Database rows, favorites and views are re-keyed before the
+// directory is renamed — the watcher reacts to the old directory vanishing by
+// evicting everything under it, so the rows must already live under the new
+// path by then — and cached thumbnails are moved rather than regenerated.
+func handleRenameFolder(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Path string `json:"path"`
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+	from := body.Path
+	name := strings.TrimSpace(body.Name)
+	if !isValidPath(from) {
+		http.Error(w, "invalid folder", http.StatusBadRequest)
+		return
+	}
+	if !isValidFilename(name) || strings.HasPrefix(name, ".") {
+		http.Error(w, "Invalid name", http.StatusBadRequest)
+		return
+	}
+	to := name
+	if i := strings.LastIndexByte(from, '/'); i >= 0 {
+		to = from[:i+1] + name
+	}
+	if to == from {
+		http.Error(w, "The folder already has that name", http.StatusBadRequest)
+		return
+	}
+	u := userFromCtx(r)
+	if !userCanAccessFolder(u, from) || !userCanAccessFolder(u, to) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	// Assignments in config.yaml match top-level folders by name; renaming
+	// one on disk would silently drop the assignment and make it public.
+	if !strings.Contains(from, "/") {
+		if _, assigned := assignedTopFolders[from]; assigned {
+			http.Error(w, "This folder is assigned to users in config.yaml — rename it there", http.StatusConflict)
+			return
+		}
+	}
+
+	fromAbs := filepath.Join(photosDir, filepath.FromSlash(from))
+	toAbs := filepath.Join(photosDir, filepath.FromSlash(to))
+	if fi, err := os.Stat(fromAbs); err != nil || !fi.IsDir() {
+		http.Error(w, "Folder not found", http.StatusNotFound)
+		return
+	}
+	if _, err := os.Lstat(toAbs); err == nil {
+		http.Error(w, "A folder with that name already exists", http.StatusConflict)
+		return
+	}
+
+	if err := renameFolderRecords(from, to); err != nil {
+		log.Printf("rename-folder: re-key %s -> %s: %v", from, to, err)
+		http.Error(w, "Rename failed", http.StatusInternalServerError)
+		return
+	}
+	if err := os.Rename(fromAbs, toAbs); err != nil {
+		log.Printf("rename-folder: %s -> %s: %v", fromAbs, toAbs, err)
+		if rerr := renameFolderRecords(to, from); rerr != nil {
+			log.Printf("rename-folder: restore records %s: %v", from, rerr)
+		}
+		http.Error(w, "Rename failed", http.StatusInternalServerError)
+		return
+	}
+	for _, size := range []string{"s", "m"} {
+		renameCacheDir(filepath.Join(cacheDir, size), from, to)
+	}
+	log.Printf("rename-folder: %s -> %s", from, to)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"from": from, "to": to}) //nolint:errcheck
+}
+
+// renameCacheDir moves the cached thumbnails for folder from to folder to
+// under root. If the move fails the old directory is removed instead, so the
+// thumbnails regenerate on demand rather than lingering as orphans.
+func renameCacheDir(root, from, to string) {
+	src := filepath.Join(root, filepath.FromSlash(from))
+	if _, err := os.Stat(src); err != nil {
+		return
+	}
+	dst := filepath.Join(root, filepath.FromSlash(to))
+	err := os.MkdirAll(filepath.Dir(dst), 0o755)
+	if err == nil {
+		err = os.Rename(src, dst)
+	}
+	if err != nil {
+		log.Printf("rename-folder: cache %s: %v; dropping old thumbnails", src, err)
+		os.RemoveAll(src)
+	}
+}
+
 // moveFile renames srcAbs to dstAbs. rename(2) can't span filesystems, so
 // when the destination folder is on a different mount (e.g. bind mount) it
 // falls back to copy + delete.

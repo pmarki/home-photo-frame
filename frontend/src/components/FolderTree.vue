@@ -71,6 +71,18 @@
             <path d="M8 11V7a4 4 0 0 1 7.5-2"/>
           </svg>
         </button>
+        <button
+          v-if="editable"
+          class="ft-edit"
+          :aria-label="'Rename ' + node.name"
+          title="Rename"
+          @click.stop="$emit('rename', node.path)"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 20h9"/>
+            <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>
+          </svg>
+        </button>
       </div>
       <FolderTree
         v-if="node.children.length > 0 && (highlight || isExpanded(node))"
@@ -79,7 +91,9 @@
         :depth="depth + 1"
         :auto-expand-depth="autoExpandDepth"
         :highlight="highlight"
+        :editable="editable"
         @select="$emit('select', $event)"
+        @rename="$emit('rename', $event)"
       />
     </li>
   </ul>
@@ -120,6 +134,17 @@ watch(overrides, (state) => {
   }
 }, { deep: true, flush: 'post' })
 
+// renameFolderOverrides moves the expanded/collapsed state of folder from and
+// its descendants to the new path after a rename.
+export function renameFolderOverrides(from, to) {
+  for (const key of Object.keys(overrides)) {
+    if (key === from || key.startsWith(from + '/')) {
+      overrides[to + key.slice(from.length)] = overrides[key]
+      delete overrides[key]
+    }
+  }
+}
+
 </script>
 
 <script setup>
@@ -133,9 +158,10 @@ const props = defineProps({
   depth: { type: Number, default: 0 },
   autoExpandDepth: { type: Number, default: 4 },
   highlight: { type: String, default: '' },
+  editable: { type: Boolean, default: false },
 })
 
-defineEmits(['select'])
+defineEmits(['select', 'rename'])
 
 function highlightRange(node) {
   if (!props.highlight) return null
@@ -248,6 +274,32 @@ function rowTitle(node) {
   opacity: 0.7;
 }
 .ft-row-active .ft-scope-icon { color: #c0caff; opacity: 0.85; }
+
+.ft-edit {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #8a8a98;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, background 0.12s;
+}
+.ft-edit svg { width: 14px; height: 14px; }
+.ft-row:hover .ft-edit,
+.ft-row:focus-within .ft-edit,
+.ft-row-active .ft-edit { opacity: 0.8; }
+.ft-edit:hover { color: #fff; background: rgba(255, 255, 255, 0.08); opacity: 1; }
+/* Touch screens have no hover: keep the button visible but subtle. */
+@media (hover: none) {
+  .ft-edit { opacity: 0.55; }
+}
 
 .ft-label {
   white-space: nowrap;

@@ -99,6 +99,7 @@
         @upload-files="onUploadFiles"
         @select-folder="onSelectFolder"
         @open-about="openAbout"
+        @folder-renamed="onFolderRenamed"
       />
       <AboutModal
         v-if="aboutOpen"
@@ -299,6 +300,7 @@ async function closeModal() {
 }
 
 function onPopState(e) {
+  fixRenamedFolderUrl()
   const modal = e.state?.modal ?? null
   if (modal !== null) return
 
@@ -471,6 +473,41 @@ function onSelectFolder(path) {
   if (sideMenuOpen.value) pendingFolderClose = true
   window.scrollTo(0, 0)
   setFolder(target)
+}
+
+// Folder renames made this session, oldest first. History entries created
+// before a rename still carry the old URL; fixRenamedFolderUrl maps them
+// forward when navigation lands on one.
+const folderRenames = []
+
+function applyFolderRenames(path) {
+  for (const { from, to } of folderRenames) {
+    if (path === from || path.startsWith(from + '/')) path = to + path.slice(from.length)
+  }
+  return path
+}
+
+// Rewrites the current history entry's URL when it points into a renamed
+// folder, keeping the entry's state (e.g. the side menu marker) intact.
+function fixRenamedFolderUrl() {
+  const m = window.location.pathname.match(/^\/folder\/(.+?)\/?$/)
+  if (!m) return
+  const old = decodeURI(m[1])
+  const renamed = applyFolderRenames(old)
+  if (renamed === old) return
+  history.replaceState(history.state, '', '/folder/' + encodeURI(renamed) + window.location.search + window.location.hash)
+}
+
+// After a folder rename: follow it when the current view is the renamed
+// folder or inside it; otherwise just reload, since every image URL under the
+// old path is now stale.
+function onFolderRenamed({ from, to }) {
+  folderRenames.push({ from, to })
+  fixRenamedFolderUrl()
+  const target = applyFolderRenames(folder.value)
+  if (target !== folder.value) setFolder(target)
+  else forceReload()
+  showToast('Renamed to ' + to.slice(to.lastIndexOf('/') + 1))
 }
 
 function showToast(message) {

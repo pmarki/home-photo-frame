@@ -145,3 +145,36 @@ func TestReadPool(t *testing.T) {
 		t.Error("read pool accepted a write; query_only not applied")
 	}
 }
+
+func TestRenameFolderRecordsNonASCII(t *testing.T) {
+	setupTestEnv(t)
+	seedIndexed(t, "Wakacje Łeba/plaża/1.jpg", "Wakacje Łeba/2.jpg")
+	setFavorite("Wakacje Łeba/plaża/1.jpg", "", true) //nolint:errcheck
+	// A stale row in the target range must not block the rename.
+	if _, err := db.Exec(`INSERT INTO files (path, filename, folder, file_type, file_mtime, date_taken, indexed_at)
+		VALUES ('Łeba 2024/2.jpg', '2.jpg', 'Łeba 2024', 'image', 0, 0, 0)`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := renameFolderRecords("Wakacje Łeba", "Łeba 2024"); err != nil {
+		t.Fatalf("renameFolderRecords: %v", err)
+	}
+
+	got := map[string]string{}
+	rows, _ := db.Query(`SELECT path, folder FROM files`)
+	for rows.Next() {
+		var p, f string
+		rows.Scan(&p, &f) //nolint:errcheck
+		got[p] = f
+	}
+	rows.Close()
+	want := map[string]string{"Łeba 2024/plaża/1.jpg": "Łeba 2024/plaża", "Łeba 2024/2.jpg": "Łeba 2024"}
+	if len(got) != len(want) || got["Łeba 2024/plaża/1.jpg"] != want["Łeba 2024/plaża/1.jpg"] || got["Łeba 2024/2.jpg"] != want["Łeba 2024/2.jpg"] {
+		t.Errorf("files = %v, want %v", got, want)
+	}
+	var favPath string
+	db.QueryRow(`SELECT file_path FROM file_favorites`).Scan(&favPath) //nolint:errcheck
+	if favPath != "Łeba 2024/plaża/1.jpg" {
+		t.Errorf("favorite path = %q", favPath)
+	}
+}

@@ -1327,3 +1327,144 @@ func TestHandleShareTargetFallback(t *testing.T) {
 		t.Errorf("Location = %q, want the share-pending redirect flagged no-sw", loc)
 	}
 }
+
+func TestHandleRenameFolder(t *testing.T) {
+	postRename := func(user, path, name string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]string{"path": path, "name": name})
+		return doRequestAs(handleRenameFolder, http.MethodPost, "/api/rename-folder", user, bytes.NewReader(body), "application/json")
+	}
+	pathsIn := func(t *testing.T) map[string]string {
+		t.Helper()
+		rows, err := db.Query(`SELECT path, folder FROM files`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		out := map[string]string{}
+		for rows.Next() {
+			var p, f string
+			rows.Scan(&p, &f) //nolint:errcheck
+			out[p] = f
+		}
+		return out
+	}
+
+	t.Run("renames nested folder keeping records, user data and thumbs", func(t *testing.T) {
+		setupTestEnv(t)
+		seedIndexed(t, "trips/summer/a.jpg", "trips/summer/day1/b.jpg", "trips/summerx/c.jpg")
+		setFavorite("trips/summer/day1/b.jpg", "", true) //nolint:errcheck
+		trackView("trips/summer/a.jpg", nil)
+		thumb := thumbSmallCachePath("trips/summer/day1/b.jpg")
+		os.MkdirAll(filepath.Dir(thumb), 0o755) //nolint:errcheck
+		os.WriteFile(thumb, []byte("t"), 0o644)  //nolint:errcheck
+
+		rr := postRename("", "trips/summer", "Croatia")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rr.Code, rr.Body)
+		}
+		var resp map[string]string
+		json.NewDecoder(rr.Body).Decode(&resp) //nolint:errcheck
+		if resp["from"] != "trips/summer" || resp["to"] != "trips/Croatia" {
+			t.Errorf("response = %v", resp)
+		}
+		for _, p := range []string{"trips/Croatia/a.jpg", "trips/Croatia/day1/b.jpg"} {
+			if _, err := os.Stat(filepath.Join(photosDir, p)); err != nil {
+				t.Errorf("%s missing on disk", p)
+			}
+		}
+		got := pathsIn(t)
+		want := map[string]string{
+			"trips/Croatia/a.jpg":      "trips/Croatia",
+			"trips/Croatia/day1/b.jpg": "trips/Croatia/day1",
+			"trips/summerx/c.jpg":      "trips/summerx",
+		}
+		if len(got) != len(want) {
+			t.Errorf("files = %v, want %v", got, want)
+		}
+		for p, f := range want {
+			if got[p] != f {
+				t.Errorf("%s: folder = %q, want %q (all: %v)", p, got[p], f, got)
+			}
+		}
+		var favs, views int
+		db.QueryRow(`SELECT COUNT(*) FROM file_favorites WHERE file_path = 'trips/Croatia/day1/b.jpg'`).Scan(&favs) //nolint:errcheck
+		db.QueryRow(`SELECT COUNT(*) FROM file_views WHERE file_path = 'trips/Croatia/a.jpg'`).Scan(&views)        //nolint:errcheck
+		if favs != 1 || views != 1 {
+			t.Errorf("favorites=%d views=%d after rename, want 1 and 1", favs, views)
+		}
+		if _, err := os.Stat(thumbSmallCachePath("trips/Croatia/day1/b.jpg")); err != nil {
+			t.Error("cached thumbnail was not moved")
+		}
+		if _, err := os.Stat(thumb); err == nil {
+			t.Error("cached thumbnail left at the old path")
+		}
+	})
+
+	t.Run("matches folder names literally", func(t *testing.T) {
+		setupTestEnv(t)
+		seedIndexed(t, "a_b/1.jpg", "axb/2.jpg", "a_b0/3.jpg")
+		if rr := postRename("", "a_b", "renamed"); rr.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rr.Code, rr.Body)
+		}
+		got := pathsIn(t)
+		for _, p := range []string{"renamed/1.jpg", "axb/2.jpg", "a_b0/3.jpg"} {
+			if _, ok := got[p]; !ok {
+				t.Errorf("%s missing from DB: %v", p, got)
+			}
+		}
+	})
+
+	t.Run("rejects bad requests", func(t *testing.T) {
+		setupTestEnv(t)
+		seedIndexed(t, "album/1.jpg", "other/2.jpg")
+		cases := []struct {
+			path, name string
+			want       int
+		}{
+			{"album", "", http.StatusBadRequest},
+			{"album", "a/b", http.StatusBadRequest},
+			{"album", "..", http.StatusBadRequest},
+			{"album", ".hidden", http.StatusBadRequest},
+			{"album", "album", http.StatusBadRequest},
+			{"../x", "y", http.StatusBadRequest},
+			{"missing", "y", http.StatusNotFound},
+			{"album", "other", http.StatusConflict},
+		}
+		for _, c := range cases {
+			if rr := postRename("", c.path, c.name); rr.Code != c.want {
+				t.Errorf("rename %q -> %q: status = %d, want %d (%s)", c.path, c.name, rr.Code, c.want, rr.Body)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(photosDir, "album", "1.jpg")); err != nil {
+			t.Error("rejected rename touched the folder")
+		}
+	})
+
+	t.Run("respects config-assigned folders", func(t *testing.T) {
+		setupTestEnv(t)
+		setupUsers(t, testUsersYAML)
+		seedIndexed(t, "vacation/sub/1.jpg", "work/2.jpg", "public/3.jpg")
+		cases := []struct {
+			user, path, name string
+			want             int
+		}{
+			{"alice", "vacation", "holidays", http.StatusConflict}, // assigned top-level
+			{"alice", "work", "x", http.StatusForbidden},           // bob's folder
+			{"alice", "public", "work", http.StatusForbidden},      // into bob's name
+			{"alice", "vacation/sub", "beach", http.StatusOK},      // own subfolder
+			{"alice", "public", "shared", http.StatusOK},           // unassigned top-level
+		}
+		for _, c := range cases {
+			if rr := postRename(c.user, c.path, c.name); rr.Code != c.want {
+				t.Errorf("%s: rename %q -> %q: status = %d, want %d (%s)", c.user, c.path, c.name, rr.Code, c.want, rr.Body)
+			}
+		}
+	})
+
+	t.Run("method not allowed", func(t *testing.T) {
+		setupTestEnv(t)
+		if rr := doRequest(handleRenameFolder, http.MethodGet, "/api/rename-folder", nil, ""); rr.Code != http.StatusMethodNotAllowed {
+			t.Errorf("status = %d, want 405", rr.Code)
+		}
+	})
+}
