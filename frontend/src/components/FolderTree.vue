@@ -72,7 +72,7 @@
           </svg>
         </button>
         <button
-          v-if="editable"
+          v-if="editable && canRename(node)"
           class="ft-edit"
           :aria-label="'Rename ' + node.name"
           title="Rename"
@@ -178,6 +178,14 @@ function isExpanded(node) {
 
 function toggle(node) {
   overrides[node.path] = !isExpanded(node)
+}
+
+// Top-level folders assigned to users in config.yaml (scope private/shared)
+// can't be renamed — the server rejects it, since assignments match by name.
+// Their subfolders inherit the scope but stay renamable.
+function canRename(node) {
+  const assigned = node.scope === 'private' || node.scope === 'shared'
+  return !(assigned && !node.path.includes('/'))
 }
 
 function rowTitle(node) {
