@@ -33,6 +33,12 @@
         </svg>
       </button>
       <ViewModeToggle class="header-view-mode" :mode="viewMode" @change="setViewMode" />
+      <UploadIndicator
+        class="header-upload-btn"
+        :accept="videoEnabled ? 'image/*,video/*' : 'image/*'"
+        @open="openUploadDialog(null)"
+        @upload-files="files => startUpload(files, folder)"
+      />
     </header>
 
     <FilterBar
@@ -116,10 +122,12 @@
         @logout="onLogout"
       />
       <UploadDialog
-        v-if="uploadFiles"
+        v-if="uploadDialogOpen"
+        :key="uploadDialogKey"
         :files="uploadFiles"
         :destination="uploadDestination"
         @done="onUploadDone"
+        @hide="onUploadHide"
       />
       <PostUploadCropQueue
         v-if="cropQueue"
@@ -172,6 +180,9 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import GalleryGrid from './components/GalleryGrid.vue'
 import LightboxModal from './components/LightboxModal.vue'
 import UploadDialog from './components/UploadDialog.vue'
+import UploadIndicator from './components/UploadIndicator.vue'
+import { listJobs, publicJob, removeJobs, summarize } from './uploadQueue.js'
+import { onUploadsChanged, refreshUploads, requestUploadNotifications } from './composables/uploadRunner.js'
 import PostUploadCropQueue from './components/PostUploadCropQueue.vue'
 import ViewModeToggle from './components/ViewModeToggle.vue'
 import FilterBar from './components/FilterBar.vue'
@@ -260,7 +271,9 @@ watch(hasActiveFilters, (active) => { if (active) filtersOpen.value = true })
 
 const modalOpen = ref(false)
 const modalIndex = ref(0)
-const uploadFiles = ref(null)
+const uploadDialogOpen = ref(false)
+const uploadDialogKey = ref(0) // remounts the dialog so each open queues its own files
+const uploadFiles = ref(null) // files the dialog should queue; null when reopening on the queue
 const cropQueue = ref(null)  // [{filename}] — shown after upload when non-null
 const sideMenuOpen = ref(false)
 const aboutOpen = ref(false)
@@ -320,7 +333,9 @@ function onPopState(e) {
   } else if (cropQueue.value !== null) {
     cropQueue.value = null
     forceReload()
-  } else if (uploadFiles.value !== null) {
+  } else if (uploadDialogOpen.value) {
+    // Back only hides the dialog; queued uploads keep going.
+    uploadDialogOpen.value = false
     uploadFiles.value = null
     forceReload()
   } else {
@@ -581,25 +596,35 @@ async function onChooserConfirm(destination) {
   if (!c) return
   chooser.value = null
   if (c.mode === 'upload') {
-    const files = c.pendingFiles
-    const existingPaths = new Set(images.value.map(img => img.path))
-    const target = (name) => destination ? destination + '/' + name : name
-    const duplicates = files.filter(f => existingPaths.has(target(f.name)))
-    const unique = files.filter(f => !existingPaths.has(target(f.name)))
-    if (duplicates.length > 0) {
-      const label = duplicates.length === 1
-        ? `"${duplicates[0].name}" already exists`
-        : `${duplicates.length} files already exist`
-      showToast(label)
-    }
-    if (unique.length > 0) {
-      uploadDestination.value = destination
-      uploadFiles.value = unique
-      history.pushState({ modal: 'upload' }, '')
-    }
+    await startUpload(c.pendingFiles, destination)
   } else if (c.mode === 'copy' || c.mode === 'move') {
     await performCopyMove(c.mode, destination, c.pendingPaths)
   }
+}
+
+// startUpload queues files for destination, skipping ones that already exist
+// there or are already queued. Used by the folder chooser (side menu) and the
+// header button (current folder).
+async function startUpload(files, destination) {
+  // Ideally still inside the click that started the upload: a permission
+  // prompt needs that user gesture.
+  requestUploadNotifications()
+  const existingPaths = new Set(images.value.map(img => img.path))
+  try {
+    for (const job of await listJobs()) {
+      if (job.state !== 'error') existingPaths.add(job.folder ? job.folder + '/' + job.name : job.name)
+    }
+  } catch (err) { console.warn('upload: could not read the queue', err) }
+  const target = (name) => destination ? destination + '/' + name : name
+  const duplicates = files.filter(f => existingPaths.has(target(f.name)))
+  const unique = files.filter(f => !existingPaths.has(target(f.name)))
+  if (duplicates.length > 0) {
+    const label = duplicates.length === 1
+      ? `"${duplicates[0].name}" already exists`
+      : `${duplicates.length} files already exist`
+    showToast(label)
+  }
+  if (unique.length > 0) openUploadDialog(unique, destination)
 }
 
 async function performCopyMove(action, destination, paths) {
@@ -627,8 +652,61 @@ async function performCopyMove(action, destination, paths) {
   }
 }
 
+function openUploadDialog(files, destination = '') {
+  uploadFiles.value = files
+  uploadDestination.value = destination
+  uploadDialogKey.value++
+  if (uploadDialogOpen.value) return
+  uploadDialogOpen.value = true
+  history.pushState({ modal: 'upload' }, '')
+}
+
+function onUploadHide() {
+  uploadDialogOpen.value = false
+  uploadFiles.value = null
+  if (history.state?.modal === 'upload') history.back()
+}
+
+// Uploads that finish while the dialog is hidden or the app was closed: a
+// toast for successes, or the dialog again when something failed so it can be
+// retried.
+const reportedUploads = new Set()
+async function onBackgroundUploads(jobs) {
+  if (uploadDialogOpen.value || jobs.length === 0) return
+  const s = summarize(jobs)
+  if (s.pending > 0) return
+  if (s.failed > 0) {
+    openUploadDialog(null)
+    return
+  }
+  const fresh = jobs.filter(j => !reportedUploads.has(j.id))
+  if (fresh.length === 0) return
+  for (const j of fresh) reportedUploads.add(j.id)
+  showToast(`${fresh.length} upload${fresh.length !== 1 ? 's' : ''} finished`)
+  forceReload()
+  try { await removeJobs(fresh.map(j => j.id)) } catch (err) { console.warn('upload: could not clear finished jobs', err) }
+  refreshUploads()
+}
+
+// On launch, reopen the dialog on unfinished uploads (which also resumes
+// them); on launch or return to the app, report ones that finished meanwhile.
+async function checkUploadQueue({ reopen }) {
+  if (uploadDialogOpen.value) return
+  let jobs
+  try { jobs = (await listJobs()).map(publicJob) } catch { return }
+  if (reopen && jobs.some(j => j.state === 'queued' || j.state === 'uploading')) openUploadDialog(null)
+  else onBackgroundUploads(jobs)
+}
+
+function onAppVisible() {
+  if (document.visibilityState === 'visible') checkUploadQueue({ reopen: false })
+}
+
+const stopUploadWatch = onUploadsChanged(onBackgroundUploads)
+
 function onUploadDone(uploadedImages) {
   const croppable = (uploadedImages ?? []).filter(i => !isVideo(i.filename))
+  uploadDialogOpen.value = false
   uploadFiles.value = null
   if (croppable.length > 0) {
     history.replaceState({ modal: 'cropqueue' }, '')
@@ -790,6 +868,8 @@ onMounted(async () => {
   window.addEventListener('popstate', onPopState)
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('auth:required', onAuthRequired)
+  document.addEventListener('visibilitychange', onAppVisible)
+  checkUploadQueue({ reopen: true })
 
   if (usersEnabled) {
     if (!userId.value) {
@@ -805,6 +885,8 @@ onUnmounted(() => {
   window.removeEventListener('popstate', onPopState)
   window.removeEventListener('keydown', onGlobalKeydown)
   window.removeEventListener('auth:required', onAuthRequired)
+  document.removeEventListener('visibilitychange', onAppVisible)
+  stopUploadWatch()
 })
 </script>
 
@@ -856,6 +938,11 @@ body {
 
 .header-filter-btn {
   margin-left: auto;
+}
+
+/* The view-mode toggle grows (flex: 1), so this sits at the right edge. */
+.header-upload-btn {
+  margin-left: 12px;
 }
 
 .app-title {

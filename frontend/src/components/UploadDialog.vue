@@ -10,11 +10,14 @@
         <div>
           <h2 class="su-title">Uploading photos</h2>
           <p class="su-subtitle">{{ statusLine }}</p>
+          <p v-if="inBackground && !allDone && !preparing && items.length" class="su-hint">
+            You can close the app — uploads continue in the background
+          </p>
         </div>
       </div>
 
       <ul class="su-file-list">
-        <li v-for="item in items" :key="item.name + item.index" class="su-file-item">
+        <li v-for="item in items" :key="item.id" class="su-file-item">
           <div class="su-file-info">
             <span class="su-file-name">{{ item.name }}</span>
             <span class="su-file-size">{{ formatSize(item.size) }}</span>
@@ -45,8 +48,11 @@
           <button class="su-btn su-btn-secondary" @click="finish(false)">Done</button>
           <button v-if="croppableCount > 0" class="su-btn su-btn-primary" @click="finish(true)">Crop</button>
         </div>
-        <button v-else-if="!uploading" class="su-btn su-btn-secondary" @click="finish(false)">
-          Cancel
+        <button v-else-if="queueError" class="su-btn su-btn-secondary" @click="emit('done', [])">
+          Close
+        </button>
+        <button v-else-if="!preparing" class="su-btn su-btn-secondary" @click="emit('hide')">
+          Hide
         </button>
       </div>
     </div>
@@ -56,130 +62,80 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { lockBodyOverflow, unlockBodyOverflow } from '../composables/useBodyOverflowLock.js'
+import { enqueue, removeJobs, requeue } from '../uploadQueue.js'
+import { backgroundUploads, onUploadsChanged, refreshUploads, startUploads } from '../composables/uploadRunner.js'
 
+// Shows the upload queue. With files it first queues them; without, it
+// reopens on whatever is still queued or unacknowledged. Uploading itself
+// runs in the service worker (or the page, as a fallback), so hiding the
+// dialog or closing the app doesn't stop it.
 const props = defineProps({
-  files: { type: Array, required: true }, // Array of File objects
+  files: { type: Array, default: null }, // File objects to queue, or null to just show the queue
   destination: { type: String, default: '' }, // target folder relative to photos root
 })
 
-const emit = defineEmits(['done'])
+const emit = defineEmits(['done', 'hide'])
 
 const items = ref([])
-const uploading = ref(false)
+const preparing = ref(false)
+const queueError = ref('')
+const inBackground = backgroundUploads()
 
 const isVideo = (filename) => /\.(mp4|webm|mov|m4v)$/i.test(filename ?? '')
 
 const doneCount      = computed(() => items.value.filter(i => i.state === 'done').length)
 const errorCount     = computed(() => items.value.filter(i => i.state === 'error').length)
 const croppableCount = computed(() => items.value.filter(i => i.state === 'done' && !isVideo(i.name)).length)
-const allDone        = computed(() => items.value.length > 0 && items.value.every(i => i.state === 'done' || i.state === 'error'))
+const allDone        = computed(() => !preparing.value && items.value.length > 0 && items.value.every(i => i.state === 'done' || i.state === 'error'))
 
 const statusLine = computed(() => {
-  if (items.value.length === 0) return 'Preparing…'
+  if (queueError.value) return queueError.value
+  if (preparing.value || items.value.length === 0) return 'Preparing…'
   if (allDone.value) {
     return errorCount.value
       ? `${doneCount.value} saved, ${errorCount.value} failed`
       : `${doneCount.value} photo${doneCount.value !== 1 ? 's' : ''} saved`
   }
-  const active = items.value.findIndex(i => i.state === 'uploading')
-  return `Uploading ${active + 1} of ${items.value.length}…`
+  const current = Math.min(doneCount.value + errorCount.value + 1, items.value.length)
+  return `Uploading ${current} of ${items.value.length}…`
 })
 
-const CHUNK_SIZE = 1.5 * 1024 * 1024  // 1.5 MB per chunk
-
-function sendChunk(chunk, uploadId, chunkIndex, totalChunks, filename, item, folder) {
-  return new Promise((resolve) => {
-    const xhr = new XMLHttpRequest()
-    const form = new FormData()
-    form.append('file', chunk)
-    form.append('uploadId', uploadId)
-    form.append('chunkIndex', String(chunkIndex))
-    form.append('totalChunks', String(totalChunks))
-    form.append('filename', filename)
-    if (folder) form.append('folder', folder)
-
-    xhr.upload.addEventListener('progress', (e) => {
-      if (e.lengthComputable)
-        item.progress = Math.round(((chunkIndex + e.loaded / e.total) / totalChunks) * 100)
-    })
-    xhr.addEventListener('load', () => resolve({ status: xhr.status, body: xhr.responseText }))
-    xhr.addEventListener('error', () => resolve({ status: 0, body: '' }))
-
-    xhr.open('POST', '/api/upload')
-    xhr.send(form)
-  })
+function setJobs(jobs) {
+  items.value = jobs
 }
 
-async function uploadFile(file, item) {
-  const totalChunks = Math.max(1, Math.ceil(file.size / CHUNK_SIZE))
-  const uploadId = crypto.randomUUID()
-  let lastBody = ''
+// Subscribers (this dialog, the header indicator) all get the new queue.
+const refresh = refreshUploads
 
-  for (let i = 0; i < totalChunks; i++) {
-    const start = i * CHUNK_SIZE
-    const chunk = file.slice(start, Math.min(start + CHUNK_SIZE, file.size))
-    const { status, body } = await sendChunk(chunk, uploadId, i, totalChunks, file.name, item, props.destination)
-    lastBody = body
-
-    if (status === 0) { item.state = 'error'; item.error = 'Network error'; return false }
-    if (status === 409) { item.state = 'error'; item.error = 'File already exists'; return false }
-    if (status < 200 || status >= 300) { item.state = 'error'; item.error = body.trim() || `Server error ${status}`; return false }
-  }
-
-  item.progress = 100
-  item.state = 'done'
+async function queueFiles() {
+  preparing.value = true
   try {
-    const d = JSON.parse(lastBody)
-    item.savedFilename = d.filename
-    item.savedThumbSmall = d.thumbSmall
-    item.savedOriginal = d.original
-  } catch (e) { console.warn('upload: could not parse server response', e) }
-  return true
-}
-
-async function runUploads() {
-  uploading.value = true
-  items.value = props.files.map((f, i) => ({
-    index: i,
-    name: f.name,
-    size: f.size,
-    state: 'queued',
-    progress: 0,
-    error: null,
-    savedFilename: null,
-  }))
-
-  for (let i = 0; i < props.files.length; i++) {
-    items.value[i].state = 'uploading'
-    await uploadFile(props.files[i], items.value[i])
+    await enqueue(props.files, props.destination)
+  } catch (err) {
+    console.error('upload: could not queue files', err)
+    queueError.value = 'Could not queue the upload — is the device out of storage?'
+    return
+  } finally {
+    preparing.value = false
   }
-  uploading.value = false
+  await refresh()
+  startUploads()
 }
 
 async function retryFailed() {
-  const failedIndices = items.value
-    .map((item, i) => item.state === 'error' ? i : -1)
-    .filter(i => i !== -1)
-
-  for (const i of failedIndices) {
-    items.value[i].state = 'queued'
-    items.value[i].progress = 0
-    items.value[i].error = null
-  }
-
-  uploading.value = true
-  for (const i of failedIndices) {
-    items.value[i].state = 'uploading'
-    await uploadFile(props.files[i], items.value[i])
-  }
-  uploading.value = false
+  await requeue(items.value.filter(i => i.state === 'error').map(i => i.id))
+  await refresh()
+  startUploads()
 }
 
-function finish(withCrop) {
+async function finish(withCrop) {
   const uploaded = withCrop
-    ? items.value.filter(i => i.state === 'done' && i.savedFilename && !isVideo(i.name))
-        .map(i => ({ filename: i.savedFilename, thumbSmall: i.savedThumbSmall, original: i.savedOriginal }))
+    ? items.value.filter(i => i.state === 'done' && i.result?.filename && !isVideo(i.name))
+        .map(i => ({ filename: i.result.filename, thumbSmall: i.result.thumbSmall, original: i.result.original }))
     : []
+  const finished = items.value.filter(i => i.state === 'done' || i.state === 'error').map(i => i.id)
+  try { await removeJobs(finished) } catch (err) { console.warn('upload: could not clear finished jobs', err) }
+  refresh()
   emit('done', uploaded)
 }
 
@@ -189,11 +145,28 @@ function formatSize(bytes) {
   return (bytes / 1048576).toFixed(1) + ' MB'
 }
 
-onMounted(() => {
+function onVisibility() {
+  if (document.visibilityState === 'visible') refresh()
+}
+
+let unsubscribe = null
+
+onMounted(async () => {
   lockBodyOverflow()
-  runUploads()
+  unsubscribe = onUploadsChanged(setJobs)
+  document.addEventListener('visibilitychange', onVisibility)
+  if (props.files?.length) {
+    await queueFiles()
+  } else {
+    await refresh()
+    if (items.value.some(i => i.state === 'queued' || i.state === 'uploading')) startUploads()
+  }
 })
-onUnmounted(() => unlockBodyOverflow())
+onUnmounted(() => {
+  unlockBodyOverflow()
+  unsubscribe?.()
+  document.removeEventListener('visibilitychange', onVisibility)
+})
 </script>
 
 <style scoped>
@@ -251,6 +224,12 @@ onUnmounted(() => unlockBodyOverflow())
 .su-subtitle {
   font-size: 0.82rem;
   color: #888;
+}
+
+.su-hint {
+  margin-top: 4px;
+  font-size: 0.75rem;
+  color: #6c6c7a;
 }
 
 .su-file-list {

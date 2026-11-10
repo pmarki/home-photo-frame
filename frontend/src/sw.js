@@ -4,6 +4,7 @@ import { registerRoute, NavigationRoute } from 'workbox-routing'
 import { CacheFirst, NetworkFirst, StaleWhileRevalidate } from 'workbox-strategies'
 import { ExpirationPlugin } from 'workbox-expiration'
 import { CacheableResponsePlugin } from 'workbox-cacheable-response'
+import { SYNC_TAG, listJobs, publicJob, runQueue, summarize } from './uploadQueue.js'
 
 // Activate a new SW as soon as it installs. vite-plugin-pwa only injects this
 // for generated workers; with injectManifest it's on us. Without it a new
@@ -85,6 +86,113 @@ async function handleShareTarget(request) {
 
   // Always redirect to the app; ?share-pending=1 triggers the upload UI
   return Response.redirect('/?share-pending=1', 303)
+}
+
+// ── Background uploads ────────────────────────────────────────────────
+// The page queues uploads in IndexedDB (uploadQueue.js) and registers a sync;
+// the worker uploads from here, so closing the app doesn't stop them.
+
+// Chrome cancels a sync event after a few minutes; stop starting chunks well
+// before that and continue in a fresh sync event.
+const UPLOAD_RUN_BUDGET_MS = 150_000
+const UPLOAD_NOTIFICATION_TAG = 'uploads'
+const UPLOAD_ICON = '/icons/icon-192.png'
+let lastProgressBody = ''
+
+self.addEventListener('sync', (event) => {
+  if (event.tag !== SYNC_TAG) return
+  event.waitUntil((async () => {
+    const outcome = await runUploads()
+    if (outcome === 'more') await self.registration.sync.register(SYNC_TAG)
+    if (outcome === 'retry') {
+      if (event.lastChance) {
+        await showUploadNotification('Uploads paused', 'Open the app to continue', { silent: true })
+      }
+      // Rejecting makes Chrome retry the sync later, with backoff.
+      throw new Error('upload interrupted')
+    }
+  })())
+})
+
+// Sent by the page whenever it starts uploads, so they begin (or resume after
+// a failure) without waiting for the sync event.
+self.addEventListener('message', (event) => {
+  if (event.data?.type !== 'uploads-kick') return
+  event.waitUntil(runUploads().then((outcome) => {
+    if (outcome !== 'idle') return self.registration.sync?.register(SYNC_TAG).catch(() => {})
+  }))
+})
+
+self.addEventListener('notificationclick', (event) => {
+  if (event.notification.tag !== UPLOAD_NOTIFICATION_TAG) return
+  event.notification.close()
+  event.waitUntil((async () => {
+    const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    if (wins.length > 0) return wins[0].focus()
+    return self.clients.openWindow('/')
+  })())
+})
+
+async function runUploads() {
+  let worked = false
+  const outcome = await runQueue({
+    deadline: Date.now() + UPLOAD_RUN_BUDGET_MS,
+    onProgress: async () => {
+      worked = true
+      await broadcastUploads(false)
+    },
+  })
+  if (worked) await broadcastUploads(outcome === 'idle')
+  return outcome
+}
+
+// broadcastUploads sends the queue to open windows and, while none is
+// visible, keeps a notification up to date. finished marks the end of a run
+// that emptied the queue.
+async function broadcastUploads(finished) {
+  const jobs = (await listJobs()).map(publicJob)
+  const wins = await self.clients.matchAll({ type: 'window' })
+  for (const win of wins) win.postMessage({ type: 'uploads-progress', jobs })
+
+  const s = summarize(jobs)
+  if (wins.some((w) => w.visibilityState === 'visible')) {
+    // The page shows progress itself.
+    if (finished) {
+      lastProgressBody = ''
+      await closeUploadNotifications()
+    }
+    return
+  }
+  if (s.pending > 0) {
+    // Progress is reported per chunk; only touch the notification per file.
+    const body = `${s.done + s.failed + 1} of ${s.total}`
+    if (body === lastProgressBody) return
+    lastProgressBody = body
+    await showUploadNotification('Uploading photos', body, { silent: true })
+  } else if (finished) {
+    lastProgressBody = ''
+    const saved = `${s.done} saved`
+    await showUploadNotification('Upload finished', s.failed ? `${saved}, ${s.failed} failed` : saved, { renotify: true })
+  }
+}
+
+async function showUploadNotification(title, body, options) {
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
+  try {
+    await self.registration.showNotification(title, {
+      body,
+      tag: UPLOAD_NOTIFICATION_TAG,
+      icon: UPLOAD_ICON,
+      ...options,
+    })
+  } catch (err) {
+    console.warn('[SW] upload notification failed:', err)
+  }
+}
+
+async function closeUploadNotifications() {
+  const shown = await self.registration.getNotifications({ tag: UPLOAD_NOTIFICATION_TAG })
+  for (const n of shown) n.close()
 }
 
 // Earlier versions cached whole videos in the originals cache; drop them on
