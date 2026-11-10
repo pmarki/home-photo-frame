@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1328,6 +1329,42 @@ func TestChunkedUploadFailureKeepsNoResult(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cacheDir, "uploads", "conflict-1")); !os.IsNotExist(err) {
 		t.Errorf("failed upload left its directory behind (err %v)", err)
+	}
+}
+
+func TestHandleUploadVideoWritesThumbs(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	setupTestEnv(t)
+	supportedExts[".mp4"] = true
+	t.Cleanup(func() { delete(supportedExts, ".mp4") })
+
+	clip := filepath.Join(t.TempDir(), "clip.mp4")
+	out, err := exec.Command("ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10",
+		"-t", "1", "-pix_fmt", "yuv420p", clip).CombinedOutput()
+	if err != nil {
+		t.Fatalf("making test clip: %v: %s", err, out)
+	}
+	data, err := os.ReadFile(clip)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body, ct := multipartFile(t, "clip.mp4", data)
+	rr := doRequest(handleUpload, http.MethodPost, "/api/upload", body, ct)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+	for _, p := range []string{thumbSmallCachePath("clip.mp4"), thumbMediumCachePath("clip.mp4")} {
+		if !cacheFileReady(p) {
+			t.Errorf("thumbnail %s not written at upload", p)
+		}
+	}
+	var w, h int
+	db.QueryRow(`SELECT width, height FROM files WHERE path = 'clip.mp4'`).Scan(&w, &h) //nolint:errcheck
+	if w != 320 || h != 240 {
+		t.Errorf("dimensions = %dx%d, want 320x240", w, h)
 	}
 }
 

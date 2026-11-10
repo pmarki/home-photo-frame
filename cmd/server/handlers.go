@@ -383,19 +383,25 @@ func saveUploadedFile(ctx context.Context, w http.ResponseWriter, src io.Reader,
 			http.Error(w, "image too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		if err := acquireDecode(ctx); err == nil {
-			srcImg, derr := openSourceImage(imgPath, false, "upload")
-			if derr == nil {
-				b := srcImg.Bounds()
-				imgW, imgH = b.Dx(), b.Dy()
-				// Both sizes from the same decoded image — avoids a second
-				// full decode on the first lightbox view.
-				if _, _, err := writeThumbs(imgPath, srcImg, true, true); err != nil {
-					log.Printf("upload: thumbs %s: %v", imgPath, err)
-				}
+	}
+	// Thumbnails now, for videos too (a frame via ffmpeg): otherwise the
+	// gallery's first view of a fresh batch queues an ffmpeg run per video,
+	// and those slow requests hold the browser's few connections while the
+	// video itself waits to start.
+	if err := acquireDecode(ctx); err == nil {
+		srcImg, derr := openSourceImage(imgPath, false, "upload")
+		if derr == nil {
+			b := srcImg.Bounds()
+			imgW, imgH = b.Dx(), b.Dy()
+			// Both sizes from the same decoded image — avoids a second
+			// full decode on the first lightbox view.
+			if _, _, err := writeThumbs(imgPath, srcImg, true, true); err != nil {
+				log.Printf("upload: thumbs %s: %v", imgPath, err)
 			}
-			releaseDecode()
+		} else {
+			log.Printf("upload: no thumbnail for %s yet: %v", imgPath, derr)
 		}
+		releaseDecode()
 	}
 
 	indexFileRecord(imgPath, imgW, imgH)
