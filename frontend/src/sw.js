@@ -92,9 +92,12 @@ async function handleShareTarget(request) {
 // The page queues uploads in IndexedDB (uploadQueue.js) and registers a sync;
 // the worker uploads from here, so closing the app doesn't stop them.
 
-// Chrome cancels a sync event after a few minutes; stop starting chunks well
-// before that and continue in a fresh sync event.
-const UPLOAD_RUN_BUDGET_MS = 150_000
+// Chrome cuts a sync event off after 3 minutes and counts it as a failure
+// (5 and 15 minute backoff, then it gives up). A run stops starting chunks
+// after the budget, aborts one still in flight at the hard stop, and
+// continues in a fresh sync event.
+const UPLOAD_RUN_BUDGET_MS = 120_000
+const UPLOAD_RUN_STOP_MS = 160_000
 const UPLOAD_NOTIFICATION_TAG = 'uploads'
 const UPLOAD_ICON = '/icons/icon-192.png'
 let lastProgressBody = ''
@@ -104,6 +107,13 @@ self.addEventListener('sync', (event) => {
   event.waitUntil((async () => {
     const outcome = await runUploads()
     if (outcome === 'more') await self.registration.sync.register(SYNC_TAG)
+    if (outcome === 'retry' && !navigator.onLine) {
+      // Offline (e.g. the phone dropped Wi-Fi while the app was hidden):
+      // a fresh registration fires when the connection is back, without
+      // spending one of Chrome's three attempts or waiting out a backoff.
+      await self.registration.sync.register(SYNC_TAG)
+      return
+    }
     if (outcome === 'retry') {
       if (event.lastChance) {
         await showUploadNotification('Uploads paused', 'Open the app to continue', { silent: true })
@@ -119,7 +129,8 @@ self.addEventListener('sync', (event) => {
 self.addEventListener('message', (event) => {
   if (event.data?.type !== 'uploads-kick') return
   event.waitUntil(runUploads().then((outcome) => {
-    if (outcome !== 'idle') return self.registration.sync?.register(SYNC_TAG).catch(() => {})
+    // 'busy': another run is active and carries on by itself.
+    if (outcome === 'more' || outcome === 'retry') return self.registration.sync?.register(SYNC_TAG).catch(() => {})
   }))
 })
 
@@ -136,7 +147,8 @@ self.addEventListener('notificationclick', (event) => {
 async function runUploads() {
   let worked = false
   const outcome = await runQueue({
-    deadline: Date.now() + UPLOAD_RUN_BUDGET_MS,
+    budgetMs: UPLOAD_RUN_BUDGET_MS,
+    stopAfterMs: UPLOAD_RUN_STOP_MS,
     onProgress: async () => {
       worked = true
       await broadcastUploads(false)

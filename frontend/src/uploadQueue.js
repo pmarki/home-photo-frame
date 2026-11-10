@@ -136,28 +136,46 @@ export function summarize(jobs) {
   return s
 }
 
-// runQueue uploads queued jobs until the queue is empty or the deadline
-// passes. Only one runner works at a time across the page and the service
-// worker; a second caller waits for the first and then finds what's left.
-// Resolves to 'idle' (nothing left), 'more' (deadline hit) or 'retry' (the
-// server or network is unreachable).
-export async function runQueue({ deadline = Infinity, onProgress } = {}) {
-  const work = () => processQueue(deadline, onProgress)
+// runQueue uploads queued jobs until the queue is empty or time runs out.
+// budgetMs stops it starting new chunks; stopAfterMs aborts a chunk still in
+// flight, so a run never outlives the event that hosts it (Chrome cuts a sync
+// event off after 3 minutes and counts that as a failure).
+//
+// Only one runner works at a time across the page and the service worker. A
+// caller that finds another run active returns 'busy' at once rather than
+// waiting — waiting would burn its own event's time — and the active run
+// picks up whatever was queued meanwhile.
+//
+// Resolves to 'idle' (nothing left), 'more' (out of time), 'retry' (server or
+// network unreachable) or 'busy'.
+export async function runQueue({ budgetMs = Infinity, stopAfterMs = Infinity, onProgress } = {}) {
   const locks = globalThis.navigator?.locks
-  return locks ? locks.request(LOCK_NAME, work) : work()
+  for (;;) {
+    const work = () => {
+      const start = Date.now()
+      return processQueue({ deadline: start + budgetMs, stopAt: start + stopAfterMs }, onProgress)
+    }
+    const outcome = locks
+      ? await locks.request(LOCK_NAME, { ifAvailable: true }, (lock) => (lock ? work() : 'busy'))
+      : await work()
+    // A job queued just as this run found the queue empty was turned away
+    // as 'busy'; it's committed by now, so look once more.
+    if (outcome === 'idle' && (await listJobs()).some(isPending)) continue
+    return outcome
+  }
 }
 
-async function processQueue(deadline, onProgress) {
+async function processQueue(limits, onProgress) {
   for (;;) {
     const job = (await listJobs()).find(isPending)
     if (!job) return 'idle'
-    if (Date.now() > deadline) return 'more'
-    const outcome = await uploadJob(job, deadline, onProgress)
+    if (Date.now() > limits.deadline) return 'more'
+    const outcome = await uploadJob(job, limits, onProgress)
     if (outcome !== 'next') return outcome
   }
 }
 
-async function uploadJob(job, deadline, onProgress) {
+async function uploadJob(job, limits, onProgress) {
   const blob = await getBlob(job.id)
   if (!blob) {
     job.state = 'error'
@@ -172,8 +190,9 @@ async function uploadJob(job, deadline, onProgress) {
     await onProgress?.()
   }
   for (let i = job.nextChunk; i < job.totalChunks; i++) {
-    if (Date.now() > deadline) return 'more'
-    const res = await sendChunkWithRetry(job, blob, i)
+    if (Date.now() > limits.deadline) return 'more'
+    const res = await sendChunkWithRetry(job, blob, i, limits.stopAt)
+    if (res.stopped) return 'more'
     if (res.transient) return 'retry'
     if (!res.ok) {
       job.state = 'error'
@@ -199,16 +218,18 @@ async function uploadJob(job, deadline, onProgress) {
   return 'next'
 }
 
-async function sendChunkWithRetry(job, blob, index) {
+async function sendChunkWithRetry(job, blob, index, stopAt) {
   let res
   for (let attempt = 0; ; attempt++) {
-    res = await sendChunk(job, blob, index)
-    if (!res.transient || attempt >= CHUNK_RETRY_DELAYS_MS.length) return res
-    await new Promise((r) => setTimeout(r, CHUNK_RETRY_DELAYS_MS[attempt]))
+    res = await sendChunk(job, blob, index, stopAt)
+    if (res.stopped || !res.transient || attempt >= CHUNK_RETRY_DELAYS_MS.length) return res
+    const delay = CHUNK_RETRY_DELAYS_MS[attempt]
+    if (Date.now() + delay >= stopAt) return { ...res, stopped: true }
+    await new Promise((r) => setTimeout(r, delay))
   }
 }
 
-async function sendChunk(job, blob, index) {
+async function sendChunk(job, blob, index, stopAt) {
   const start = index * CHUNK_SIZE
   const form = new FormData()
   form.append('file', blob.slice(start, Math.min(start + CHUNK_SIZE, job.size)), job.name)
@@ -217,18 +238,20 @@ async function sendChunk(job, blob, index) {
   form.append('totalChunks', String(job.totalChunks))
   form.append('filename', job.name)
   if (job.folder) form.append('folder', job.folder)
+  const timeoutMs = Math.min(CHUNK_TIMEOUT_MS, stopAt - Date.now())
   try {
     const res = await fetch('/api/upload', {
       method: 'POST',
       body: form,
       credentials: 'same-origin',
-      signal: AbortSignal.timeout(CHUNK_TIMEOUT_MS),
+      signal: AbortSignal.timeout(Math.max(0, timeoutMs)),
     })
     const body = await res.text()
     // 5xx, 408 and 429 are worth retrying later; other 4xx are final.
     const transient = res.status >= 500 || res.status === 408 || res.status === 429
     return { ok: res.ok, status: res.status, body, transient }
   } catch {
-    return { ok: false, status: 0, body: '', transient: true }
+    // Aborted at the run's hard stop: not a failure, the next run resends it.
+    return { ok: false, status: 0, body: '', transient: true, stopped: Date.now() >= stopAt }
   }
 }
