@@ -202,6 +202,21 @@ func handleChunkedUpload(w http.ResponseWriter, r *http.Request, uploadID string
 		return
 	}
 
+	tmpDir := filepath.Join(cacheDir, "uploads", uploadID)
+	resultPath := filepath.Join(tmpDir, "result.json")
+	isLast := chunkIndex == totalChunks-1
+
+	// Background uploads retry a chunk whose response was lost. A replayed
+	// final chunk of an upload that already succeeded gets the same answer
+	// instead of "missing chunk 0" (the chunks are gone by then).
+	if isLast {
+		if data, err := os.ReadFile(resultPath); err == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(data) //nolint:errcheck
+			return
+		}
+	}
+
 	src, _, err := r.FormFile("file")
 	if err != nil {
 		http.Error(w, "missing 'file' field", http.StatusBadRequest)
@@ -209,7 +224,6 @@ func handleChunkedUpload(w http.ResponseWriter, r *http.Request, uploadID string
 	}
 	defer src.Close()
 
-	tmpDir := filepath.Join(cacheDir, "uploads", uploadID)
 	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
 		http.Error(w, "failed to create upload dir", http.StatusInternalServerError)
 		return
@@ -228,7 +242,7 @@ func handleChunkedUpload(w http.ResponseWriter, r *http.Request, uploadID string
 	}
 	cf.Close()
 
-	if chunkIndex < totalChunks-1 {
+	if !isLast {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "chunk_ok"}) //nolint:errcheck
 		return
@@ -265,9 +279,44 @@ func handleChunkedUpload(w http.ResponseWriter, r *http.Request, uploadID string
 		http.Error(w, "seek failed", http.StatusInternalServerError)
 		return
 	}
-	saveUploadedFile(r.Context(), w, asm, filename, folder)
+	rec := newCapturedResponse()
+	saveUploadedFile(r.Context(), rec, asm, filename, folder)
 	asm.Close()
 	os.RemoveAll(tmpDir)
+	if rec.status == http.StatusOK {
+		// Keep only the result, for replays; sweepOrphanedUploads removes it
+		// with the directory after 24 h.
+		if err := os.MkdirAll(tmpDir, 0o755); err == nil {
+			if err := writeFileAtomic(resultPath, rec.body.Bytes(), 0o644, false); err != nil {
+				log.Printf("upload: saving result for %s: %v", uploadID, err)
+			}
+		}
+	}
+	rec.writeTo(w)
+}
+
+// capturedResponse buffers a handler's response so the caller can inspect it
+// before forwarding it to the client.
+type capturedResponse struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func newCapturedResponse() *capturedResponse {
+	return &capturedResponse{header: http.Header{}, status: http.StatusOK}
+}
+
+func (c *capturedResponse) Header() http.Header         { return c.header }
+func (c *capturedResponse) Write(b []byte) (int, error) { return c.body.Write(b) }
+func (c *capturedResponse) WriteHeader(status int)      { c.status = status }
+
+func (c *capturedResponse) writeTo(w http.ResponseWriter) {
+	for k, v := range c.header {
+		w.Header()[k] = v
+	}
+	w.WriteHeader(c.status)
+	w.Write(c.body.Bytes()) //nolint:errcheck
 }
 
 func saveUploadedFile(ctx context.Context, w http.ResponseWriter, src io.Reader, originalName, folder string) {

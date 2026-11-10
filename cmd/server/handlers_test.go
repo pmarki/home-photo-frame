@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1260,6 +1261,73 @@ func TestHandleUploadPixelLimit(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(photosDir, "big.jpg")); err == nil {
 		t.Error("over-limit upload was left on disk")
+	}
+}
+
+// postChunk sends one chunk of a chunked upload.
+func postChunk(t *testing.T, uploadID string, index, total int, filename string, data []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	body := &bytes.Buffer{}
+	w := multipart.NewWriter(body)
+	w.WriteField("uploadId", uploadID)               //nolint:errcheck
+	w.WriteField("chunkIndex", strconv.Itoa(index))  //nolint:errcheck
+	w.WriteField("totalChunks", strconv.Itoa(total)) //nolint:errcheck
+	w.WriteField("filename", filename)               //nolint:errcheck
+	fw, err := w.CreateFormFile("file", "blob")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	fw.Write(data) //nolint:errcheck
+	w.Close()
+	return doRequest(handleUpload, http.MethodPost, "/api/upload", body, w.FormDataContentType())
+}
+
+func TestChunkedUploadReplays(t *testing.T) {
+	setupTestEnv(t)
+	data := makeTestJPEG(40, 40)
+	half := len(data) / 2
+	const id = "replay-1"
+
+	if rr := postChunk(t, id, 0, 2, "photo.jpg", data[:half]); rr.Code != http.StatusOK {
+		t.Fatalf("chunk 0: status %d", rr.Code)
+	}
+	// A retried middle chunk overwrites the first copy.
+	if rr := postChunk(t, id, 0, 2, "photo.jpg", data[:half]); rr.Code != http.StatusOK {
+		t.Fatalf("chunk 0 replay: status %d", rr.Code)
+	}
+	first := postChunk(t, id, 1, 2, "photo.jpg", data[half:])
+	if first.Code != http.StatusOK {
+		t.Fatalf("final chunk: status %d: %s", first.Code, first.Body.String())
+	}
+	got, err := os.ReadFile(filepath.Join(photosDir, "photo.jpg"))
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("assembled file differs from the upload (err %v)", err)
+	}
+
+	// The final chunk again, as if its response had been lost: same answer,
+	// not "missing chunk 0" or "file already exists".
+	replay := postChunk(t, id, 1, 2, "photo.jpg", data[half:])
+	if replay.Code != http.StatusOK {
+		t.Fatalf("final chunk replay: status %d: %s", replay.Code, replay.Body.String())
+	}
+	if replay.Body.String() != first.Body.String() {
+		t.Errorf("replay body = %s, want %s", replay.Body.String(), first.Body.String())
+	}
+	entries, _ := os.ReadDir(filepath.Join(cacheDir, "uploads", id))
+	if len(entries) != 1 || entries[0].Name() != "result.json" {
+		t.Errorf("upload dir should hold only result.json, has %v", entries)
+	}
+}
+
+func TestChunkedUploadFailureKeepsNoResult(t *testing.T) {
+	setupTestEnv(t)
+	seedFile(t, "photo.jpg", makeTestJPEG(10, 10))
+	rr := postChunk(t, "conflict-1", 0, 1, "photo.jpg", makeTestJPEG(10, 10))
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rr.Code)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, "uploads", "conflict-1")); !os.IsNotExist(err) {
+		t.Errorf("failed upload left its directory behind (err %v)", err)
 	}
 }
 
