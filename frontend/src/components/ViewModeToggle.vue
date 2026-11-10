@@ -41,7 +41,8 @@ defineEmits(['change'])
 const modes = [
   { key: 'gallery',  label: 'Gallery view' },
   { key: 'timeline', label: 'Timeline view' },
-  { key: 'browser',  label: 'File browser view' },
+  // Not used at the moment; the mode itself is still implemented.
+  // { key: 'browser',  label: 'File browser view' },
 ]
 </script>
 
